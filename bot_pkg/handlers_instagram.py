@@ -59,7 +59,6 @@ def _ig_picker_text(username, dest):
 def _ig_picker_kb(token):
     s = state.get_ig_picker_session(token)
     selected = s["selected"] if s else set()
-    order = ["posts", "reels", "stories", "highlights", "tagged"]
 
     def btn(t):
         mark = "✅ " if t in selected else "⬜ "
@@ -68,7 +67,7 @@ def _ig_picker_kb(token):
     rows = [
         [btn("posts"), btn("reels")],
         [btn("stories"), btn("highlights")],
-        [btn("tagged")],
+        [InlineKeyboardButton("🗑 Indexes", callback_data="igidx"), btn("tagged")],
         [InlineKeyboardButton("▶️ Start", callback_data=f"igstart:{token}"),
          InlineKeyboardButton("❌ Cancel", callback_data=f"igcancel:{token}")],
     ]
@@ -84,6 +83,99 @@ def cmd_ig(client, message):
             "⚠️ <code>/ig &lt;post_url&gt;</code> or <code>/ig &lt;profile_url&gt;</code> "
             "(leeches to Telegram — use <code>/m &lt;url&gt;</code> to mirror to Drive instead)")
     dispatch_instagram(client, message, parts[1].strip(), "telegram")
+
+
+# ── /igindex — per-user index manager ────────────────────────────────────
+# Index ledgers live LOCALLY under data/indexes/<chat>/<user>.<type>.txt —
+# never in Drive. Re-running an archive only fetches what's new; deleting an
+# index makes the next run re-fetch everything for that user+type.
+
+@app.on_message(filters.command(["igindex", "igindexes"]) & Authorized)
+@guarded
+def cmd_igindex(client, message):
+    _send_index_manager(message.chat.id)
+
+
+def _send_index_manager(chat_id, edit_msg=None):
+    entries = state.list_ig_indexes(chat_id)
+    total_kb = 0
+    lines = []
+    by_user = {}
+    for u, t in entries:
+        p = state.index_path(chat_id, u, t)
+        try:
+            n = sum(1 for _ in open(p, encoding="utf-8", errors="replace"))
+            total_kb += os.path.getsize(p) // 1024
+        except OSError:
+            n = 0
+        by_user.setdefault(u, []).append((t, n))
+    for u in sorted(by_user):
+        types = ", ".join(f"{ARCHIVE_LABEL.get(t, t)}: {n}" for t, n in by_user[u])
+        lines.append(f"• <b>{esc(u)}</b> — {types}")
+    text = (f"🗂 <b>Instagram indexes</b> <i>(this chat)</i>\n\n"
+            + ("\n".join(lines) if lines else "_No indexes yet — they're created on your first /ig archive._")
+            + f"\n\nTotal: {len(entries)} ledger(s), ~{total_kb} KB • stored locally, not in Drive")
+
+    rows = []
+    for u in sorted(by_user):
+        rows.append([InlineKeyboardButton(f"🗑 {u[:24]}", callback_data=f"igidxuser:{u}")])
+    rows.append([InlineKeyboardButton("💥 Wipe ALL my indexes", callback_data="igidxwipe")])
+    kb = InlineKeyboardMarkup(rows) if len(entries) else None
+
+    if edit_msg is not None:
+        safe_edit(app, chat_id, edit_msg, text, reply_markup=kb)
+    else:
+        app.send_message(chat_id, text, reply_markup=kb)
+
+
+@app.on_callback_query(filters.regex(r"^igidx$"))
+@guarded
+def cb_igidx_open(client, cq):
+    cq.answer()
+    _send_index_manager(cq.message.chat.id)
+
+
+@app.on_callback_query(filters.regex(r"^igidxuser:"))
+@guarded
+def cb_igidx_user(client, cq):
+    username = cq.data.split(":", 1)[1]
+    entries = [t for u, t in state.list_ig_indexes(cq.message.chat.id) if u == username]
+    rows = [[InlineKeyboardButton(f"🗑 {ARCHIVE_LABEL.get(t, t)} ({t})",
+                                  callback_data=f"igidxt:{username}:{t}")]
+            for t in sorted(entries)]
+    rows.append([InlineKeyboardButton("🗑 ALL of this user", callback_data=f"igidxt:{username}:all")])
+    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="igidxback")])
+    safe_edit(cq, f"🗑 Delete indexes for <b>{esc(username)}</b>:",
+              reply_markup=InlineKeyboardMarkup(rows))
+    cq.answer()
+
+
+@app.on_callback_query(filters.regex(r"^igidxt:"))
+@guarded
+def cb_igidx_delete(client, cq):
+    payload = cq.data.split(":", 1)[1]
+    username, atype = payload.rsplit(":", 1)
+    n = state.delete_ig_index(cq.message.chat.id,
+                              username=None if atype == "all" else username,
+                              archive_type=None if atype == "all" else atype)
+    label = "ALL types" if atype == "all" else atype
+    cq.answer(f"🗑 Deleted {n} ledger(s) ({label}).", show_alert=True)
+    _send_index_manager(cq.message.chat.id, edit_msg=cq.message.id)
+
+
+@app.on_callback_query(filters.regex(r"^igidxwipe$"))
+@guarded
+def cb_igidx_wipe(client, cq):
+    n = state.delete_ig_index(cq.message.chat.id)
+    cq.answer(f"💥 Wiped {n} ledger(s). Next archives start fresh.", show_alert=True)
+    _send_index_manager(cq.message.chat.id, edit_msg=cq.message.id)
+
+
+@app.on_callback_query(filters.regex(r"^igidxback$"))
+@guarded
+def cb_igidx_back(client, cq):
+    _send_index_manager(cq.message.chat.id, edit_msg=cq.message.id)
+    cq.answer()
 
 
 @app.on_callback_query(filters.regex(r"^igtoggle:"))
@@ -142,24 +234,10 @@ def run_ig_archive_job(client, chat_id, msg_id, archive_type, username, task_id,
     cookie_file = state.active_cookie_file(chat_id)
     disp = LiveDispatcher(client, chat_id, msg_id, task_dir, dest, task_id=task_id)
 
-    # gallery-dl's own download-archive keeps a persistent per-(chat,user,type)
-    # ledger of already-fetched post IDs, so re-running an archive only pulls
-    # what's new since last time — this is the "tracker" from the original bot.
-    #
-    # If Drive is configured, that ledger lives *in Drive* (like the
-    # original) — pulled down before the run, pushed back up after, and
-    # never left on disk. Without Drive it falls back to a local file so
-    # the tracker still works, just on the box instead of in the cloud.
-    archive_name = f"igtracker_{chat_id}_{username}_{archive_type}.txt"
-    use_drive_ledger = drive.enabled()
-    if use_drive_ledger:
-        archive_db = os.path.join(task_dir, "_archive.txt")  # scratch copy, wiped with task_dir
-        throttled_edit(client, chat_id, msg_id, "📥 Fetching tracker index from Drive…", force=True)
-        drive.download_named_file(archive_name, archive_db)  # no-op (leaves nothing) if it doesn't exist yet
-    else:
-        local_dir = os.path.join(config.DATA_DIR, "ig_archives")
-        os.makedirs(local_dir, exist_ok=True)
-        archive_db = os.path.join(local_dir, archive_name)
+    # Index ledger lives LOCALLY per (chat, user, type): data/indexes/<chat>/…
+    # gallery-dl's --download-archive dedup keeps re-runs incremental, and
+    # /igindex can wipe any of them independently. Nothing touches Drive.
+    archive_db = state.index_path(chat_id, username, archive_type)
 
     url = ARCHIVE_URLS[archive_type].format(u=username)
     args = ["gallery-dl", "--dest", task_dir, "--download-archive", archive_db]
@@ -169,13 +247,14 @@ def run_ig_archive_job(client, chat_id, msg_id, archive_type, username, task_id,
         args += ["--cookies", cookie_file]
     elif archive_type in ("stories", "highlights"):
         return throttled_edit(client, chat_id, msg_id,
-                               "❌ Stories/Highlights need a cookie profile — set one with `/cookie`.", force=True)
+                               "❌ Stories/Highlights need a cookie profile — set one with <code>/cookie</code>.",
+                               force=True)
     args.append(url)
 
     full_log = []
     try:
         if not shutil.which("gallery-dl"):
-            return throttled_edit(client, chat_id, msg_id, "❌ `gallery-dl` isn't installed on this host.", force=True)
+            return throttled_edit(client, chat_id, msg_id, "❌ <code>gallery-dl</code> isn't installed on this host.", force=True)
 
         logger.info(f"[{task_id}] /ig {archive_type} for @{username} starting (dest={dest})")
         proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -224,7 +303,7 @@ def run_ig_archive_job(client, chat_id, msg_id, archive_type, username, task_id,
             mins = config.STALL_TIMEOUT_S // 60
             return throttled_edit(
                 client, chat_id, msg_id,
-                f"⏱️ Stopped — no progress for {mins} minutes fetching @{username} ({archive_type}). "
+                f"⏱️ Stopped — no progress for {mins} minutes fetching @{esc(username)} ({archive_type}). "
                 f"Instagram may be rate-limiting or blocking the request.",
                 force=True,
             )
@@ -232,13 +311,6 @@ def run_ig_archive_job(client, chat_id, msg_id, archive_type, username, task_id,
         if state.is_cancelled(task_id):
             disp.stop()
             return throttled_edit(client, chat_id, msg_id, "🛑 Cancelled.", force=True)
-
-        if use_drive_ledger and os.path.exists(archive_db):
-            throttled_edit(client, chat_id, msg_id, "📤 Saving tracker index to Drive…", force=True)
-            try:
-                drive.upload_named_file(archive_name, archive_db)
-            except Exception as e:
-                logger.warning(f"[{task_id}] Drive tracker save failed: {e}")
 
         throttled_edit(client, chat_id, msg_id, "☁️ Uploading results…", markup=cancel_kb(task_id), force=True)
         sent, errors = disp.finalize(timeout=1800)

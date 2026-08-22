@@ -11,7 +11,10 @@ logger = log.get(__name__)
 ADMIN_COMMANDS = ["allow", "ban", "cancelall", "ca", "updateyt", "ytupdate", "shc", "shexit", "shq"]
 KNOWN_COMMANDS = [
     "start", "help", "m", "l", "zm", "zl", "yt", "y", "ytdl", "ytdlleech", "yl",
-    "ig", "torrent", "gallery", "clone", "cookie", "settings", "drive", "drivesearch",
+    "ig", "igindex", "igindexes",
+    "torrent", "gallery", "clone",
+    "zip", "zipd", "unzip",
+    "cookie", "settings", "drive", "drivesearch",
     "stats", "clean", "cancel", "cancelall", "ca", "sh", "shell", "shc", "shexit", "shq",
     "allow", "ban", "updateyt", "ytupdate",
 ]

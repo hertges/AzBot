@@ -58,24 +58,24 @@ def cmd_help(client, message):
 def render_help(chat_id, msg_id=None):
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("⬇️ Downloads", callback_data="help:dl"),
-         InlineKeyboardButton("📷 Instagram", callback_data="help:ig")],
-        [InlineKeyboardButton("🍪 Cookies", callback_data="help:cookies"),
-         InlineKeyboardButton("🔧 Admin", callback_data="help:admin")],
+         InlineKeyboardButton("🗃 Zip", callback_data="help:zip")],
+        [InlineKeyboardButton("📷 Instagram", callback_data="help:ig"),
+         InlineKeyboardButton("🍪 Cookies", callback_data="help:cookies")],
+        [InlineKeyboardButton("🔧 Admin", callback_data="help:admin")],
     ])
     text = (
         "👋 <b>AzLeechBot</b>\n\n"
         "Paste a link — YouTube, Instagram, TikTok, Twitter/X, Reddit, a "
         "magnet link, hundreds of other sites — and I'll <b>leech</b> it "
         "(send it back here) automatically. No command needed for that.\n\n"
-        "<code>/m &lt;link&gt;</code> — <b>mirror</b> to Drive instead\n"
-        "<code>/l &lt;link&gt;</code> — <b>leech</b> to Telegram (same as pasting with no command)\n"
-        "<code>/zm</code> / <code>/zl</code> — same, zipped into one file first\n\n"
-        "Uploads go over Telegram's MTProto layer directly (Pyrogram), so "
-        "the 50MB Bot API limit doesn't apply — files up to Telegram's real "
+        "<code>/m &lt;link&gt;</code> — <b>mirror</b> to Drive\n"
+        "<code>/l &lt;link&gt;</code> — <b>leech</b> to Telegram (same as pasting)\n"
+        "<code>/zm</code> / <code>/zl</code> — same, zipped first\n\n"
+        "<i>All commands accept multiple links, <code>| newname</code>, and "
+        "<code>#folder</code> for Drive uploads.</i>\n\n"
+        "Uploads go over MTProto directly (Pyrogram) — files up to Telegram's "
         "~2GB per-file cap go through natively.\n\n"
-        "<code>/settings</code> — toggle auto-clean for this chat (tidies up command + "
-        "status messages once a job finishes)\n\n"
-        "Tap a section below for the rest of the commands."
+        "Tap a section below for the full command list."
     )
     if msg_id:
         safe_edit(app, chat_id, msg_id, text, reply_markup=kb)
@@ -86,37 +86,47 @@ def render_help(chat_id, msg_id=None):
 HELP = {
     "dl": ("⬇️ <b>Downloads</b>\n\n"
            "Paste a link — auto-<b>leeched</b> to Telegram, no command needed.\n\n"
-           "<code>/m &lt;link&gt;</code> — mirror to Drive  •  <code>/l &lt;link&gt;</code> — leech to Telegram\n"
-           "<code>/zm &lt;link&gt;</code> / <code>/zl &lt;link&gt;</code> — same, zipped first\n"
-           "<code>/yt &lt;link&gt;</code> — alias for <code>/l</code> (leech). <code>/y</code>/<code>/ytdl</code> — alias for <code>/m</code> "
-           "(mirror) and <code>/yl</code>/<code>/ytdlleech</code> — alias for <code>/l</code> (leech), matching "
-           "WZML-X's command names.\n\n"
-           "All auto-detect the link type (YouTube/etc, Instagram, "
-           "magnet/torrent, gallery site) same as the original bot's <code>/m</code>/<code>/l</code>.\n\n"
-           "<code>/torrent &lt;magnet or .torrent url&gt;</code> — force aria2c, leeches to Telegram\n"
-           "<code>/gallery &lt;url&gt;</code> — force gallery-dl, leeches to Telegram\n"
-           "<code>/clone &lt;url&gt;</code> — mirror a website with wget, leeches to Telegram\n"
-           "<code>/drive</code> — browse your Drive folder: navigate into folders, see file "
-           "sizes, rename/delete anything, make new folders • <code>/drivesearch &lt;query&gt;</code>\n\n"
-           "Magnet links are auto-detected in plain messages too, no command needed."),
+           "<b>Every download command supports:</b>\n"
+           "• multiple links → one job per link (batch)\n"
+           "• <code>| name</code> after a link → saved as that name (extension untouched)\n"
+           "• <code>#folder</code> → Drive uploads go into that folder (auto-created)\n\n"
+           "<code>/m &lt;link&gt; | name #folder</code> — mirror to Drive\n"
+           "<code>/l &lt;link&gt;</code> — leech to Telegram\n"
+           "<code>/zm</code> / <code>/zl</code> — same, zipped into one file first\n"
+           "<code>/yt &lt;link&gt;</code>, <code>/y</code>/<code>/ytdl</code>, "
+           "<code>/yl</code>/<code>/ytdlleech</code> — WZML-X-style aliases (quality picker)\n\n"
+           "<code>/torrent &lt;magnet or .torrent url&gt;</code> — force aria2c\n"
+           "<code>/gallery &lt;url&gt;</code> / <code>/clone &lt;url&gt;</code> — gallery-dl / wget mirror\n"
+           "<code>/zip</code> · <code>/zipd</code> · <code>/unzip</code> — see the 🗃 Zip section\n\n"
+           "<code>/drive</code> — browse Drive: get links, send files here, rename/delete, new folders • <code>/drivesearch &lt;q&gt;</code>\n\n"
+           "Magnet links are auto-detected in plain messages too. Reply to any file or link instead of typing a URL."),
     "ig": ("📷 <b>Instagram</b>\n\n"
            "<code>&lt;post/reel url&gt;</code> — just paste it, leeched like any other link\n"
-           "<code>/ig &lt;profile_url&gt;</code> — multi-select picker: tap Posts/Reels/Stories/"
-           "Highlights/Tagged to toggle each on/off, then ▶️ Start to archive all "
-           "selected at once (Stories is on by default). Leeches to Telegram.\n"
-           "<code>/m &lt;profile_url&gt;</code> — same picker, but mirrors to Drive instead\n\n"
-           "Stories &amp; highlights need a logged-in cookie profile (<code>/cookie</code>)."),
+           "<code>/ig &lt;profile_url&gt;</code> — multi-select picker: Posts/Reels/Stories/"
+           "Highlights/Tagged, then ▶️ Start (Stories on by default). Leeches to Telegram.\n"
+           "<code>/m &lt;profile_url&gt;</code> — same picker, mirrored to Drive\n\n"
+           "<b>Indexes</b> (what's already fetched) are stored locally per chat/user/type — never in Drive.\n"
+           "<code>/igindex</code> — view + delete indexes per user or per type "
+           "(delete Stories only, wipe one user, or clear everything). Deleting an index makes "
+           "the next run re-fetch everything.\n\n"
+           "Stories &amp; Highlights need a logged-in cookie profile (<code>/cookie</code>)."),
+    "zip": ("🗃 <b>Zip / Unzip</b>\n\n"
+            "<code>/zip</code> — gather files into ONE archive, sent to this chat:\n"
+            "• reply to a file → zip it\n"
+            "• reply to several messages? use <code>/zip link1 link2 …</code> instead\n"
+            "<code>/zip &lt;link…&gt; | myname.zip #folder</code> — batch links + custom name\n"
+            "<code>/zipd</code> — same but uploads the archive to Drive (#folder works)\n\n"
+            "<code>/unzip</code> — reply to an archive (<code>.zip .rar .7z .tar…</code>) or pass its link: "
+            "every inner file is sent to this chat."),
     "cookies": ("🍪 <b>Cookies</b>\n\n"
                 "<code>/cookie</code> — list profiles\n<code>/cookie &lt;name&gt;</code> — switch active profile\n"
                 "Reply to a Netscape-format <code>cookies.txt</code> with <code>/cookie &lt;name&gt;</code> to add one.\n\n"
                 "Needed for private Instagram accounts, stories/highlights, age-gated videos."),
     "admin": ("🔧 <b>Admin</b>\n\n"
-              "<code>/stats</code> — disk + active jobs\n<code>/clean</code> — purge stale temp files\n"
+              "<code>/stats</code> — disk, RAM, active jobs\n<code>/clean</code> — purge stale temp files\n"
               "<code>/cancel &lt;id&gt;</code> / 🛑 button — stop a job\n<code>/cancelall</code> — stop everything\n"
-              "<code>/updateyt</code> — update yt-dlp now (also runs on startup + every 6h "
-              "automatically; restarts the bot to load it, but only when idle)\n"
-              "<code>/sh</code> — live persistent shell on the host (admin only): send commands one after "
-              "another in a real PTY with arrow keys, history, tab completion and Ctrl+C — see /help → Admin\n"
+              "<code>/updateyt</code> — update yt-dlp now (auto: startup + every 6h)\n"
+              "<code>/sh</code> — live persistent shell terminal (arrow keys, history, Ctrl+C button; <code>/shexit</code> quits)\n"
               "<code>/allow &lt;id&gt;</code> / <code>/ban &lt;id&gt;</code> — access control"),
 }
 
@@ -258,14 +268,18 @@ def handle_cookie_rename(client, message, old_name):
 def _settings_kb(chat_id):
     clean_on = state.get_autoclean(chat_id)
     doc_on = state.get_as_document(chat_id)
-    return InlineKeyboardMarkup([
+    rows = [
         [InlineKeyboardButton(
             "🧹 Auto-clean chat: " + ("✅ ON" if clean_on else "⬜ OFF"),
             callback_data="toggle_autoclean")],
         [InlineKeyboardButton(
             "📄 Always send as document: " + ("✅ ON" if doc_on else "⬜ OFF"),
             callback_data="toggle_as_document")],
-    ])
+    ]
+    if len(config.DRIVE_ACCOUNTS) > 1:
+        acct = state.get_drive_account(chat_id) or "—"
+        rows.append([InlineKeyboardButton(f"☁️ Drive account: {acct} ▸", callback_data="acctmenu")])
+    return InlineKeyboardMarkup(rows)
 
 def _settings_text(chat_id):
     clean_on = state.get_autoclean(chat_id)
@@ -285,12 +299,59 @@ def _settings_text(chat_id):
         "📄 <b>As document</b>: off — videos/audio/photos upload as their "
         "native type with previews and streaming."
     )
-    return f"⚙️ <b>Settings</b> <i>(this chat only)</i>\n\n{clean_line}\n\n{doc_line}"
+    extra = ""
+    if len(config.DRIVE_ACCOUNTS) > 1:
+        acct = state.get_drive_account(chat_id) or "—"
+        extra = f"\n\n☁️ <b>Drive account</b>: <code>{esc(acct)}</code> — where /m and /zipd upload."
+    return f"⚙️ <b>Settings</b> <i>(this chat only)</i>\n\n{clean_line}\n\n{doc_line}{extra}"
 
 @app.on_message(filters.command("settings") & Authorized)
 @guarded
 def cmd_settings(client, message):
     message.reply_text(_settings_text(message.chat.id), reply_markup=_settings_kb(message.chat.id))
+
+@app.on_callback_query(filters.regex(r"^acctmenu$"))
+@guarded
+def cb_acct_menu(client, cq):
+    chat_id = cq.message.chat.id
+    current = state.get_drive_account(chat_id)
+    rows, row = [], []
+    for name in config.DRIVE_ACCOUNTS:
+        mark = "✅ " if name == current else ""
+        row.append(InlineKeyboardButton(f"{mark}{name}", callback_data=f"acctset:{name}"))
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="acctback")])
+    safe_edit(cq, "☁️ <b>Pick the Drive account</b> for this chat:",
+              reply_markup=InlineKeyboardMarkup(rows))
+    cq.answer()
+
+@app.on_callback_query(filters.regex(r"^acctset:"))
+@guarded
+def cb_acct_set(client, cq):
+    name = cq.data.split(":", 1)[1]
+    ok = state.set_drive_account(cq.message.chat.id, name)
+    cq.answer(f"Switched to {name}" if ok else "Unknown account.", show_alert=not ok)
+    if ok:
+        kb_rows = [[InlineKeyboardButton("⚙️ Back to settings", callback_data="settingsback")]]
+        safe_edit(cq, f"☁️ Drive uploads now go to account <code>{esc(name)}</code>.",
+                  reply_markup=InlineKeyboardMarkup(kb_rows))
+
+@app.on_callback_query(filters.regex(r"^settingsback$"))
+@guarded
+def cb_settings_back(client, cq):
+    chat_id = cq.message.chat.id
+    safe_edit(cq, _settings_text(chat_id), reply_markup=_settings_kb(chat_id))
+    cq.answer()
+
+@app.on_callback_query(filters.regex(r"^acctback$"))
+@guarded
+def cb_acct_back(client, cq):
+    chat_id = cq.message.chat.id
+    safe_edit(cq, _settings_text(chat_id), reply_markup=_settings_kb(chat_id))
+    cq.answer()
 
 @app.on_callback_query(filters.regex(r"^toggle_autoclean$"))
 @guarded
@@ -347,65 +408,76 @@ def cb_cancel(client, cq):
 
 YT_DEDICATED_CMDS = ("yt", "y", "ytdl", "ytdlleech", "yl")
 
-@app.on_message(filters.command(["m", "l", "zm", "zl", "yt", "y", "ytdl", "ytdlleech", "yl"]) & Authorized)
+@app.on_message(filters.command(["m", "l", "zm", "zl", "yt", "y", "ytdl", "ytdlleech",
+                                 "yl", "torrent"]) & Authorized)
 @guarded
 def cmd_mirror_leech(client, message):
+    """Universal mirror/leech entry. Payload grammar (all commands):
+        /m <link> [<link2> …]          batch — one job per link
+        /m <link> | myname             rename — saved as `myname`, extension untouched
+        /m <link> #folder              Drive: upload into folder `folder` (auto-created)
+    Reply mode still works: reply to a file/link with no args."""
+    from .utils import parse_payload
     cmd = message.command[0]
     dest = "drive" if cmd in ("m", "zm", "y", "ytdl") else "telegram"
     zip_output = cmd in ("zm", "zl")
     if dest == "drive" and not drive.enabled():
-        return message.reply_text("☁️ Drive isn't configured on this bot (missing GCP credentials in `.env`).")
+        return message.reply_text("☁️ Drive isn't configured on this bot (missing GCP credentials in <code>.env</code>).")
 
+    raw = ""
     parts = message.text.split(maxsplit=1)
-    url = parts[1].strip() if len(parts) > 1 and parts[1].strip() else None
+    if len(parts) > 1 and parts[1].strip():
+        raw = parts[1].strip()
+    elif message.reply_to_message and (message.reply_to_message.text or message.reply_to_message.caption):
+        raw = message.reply_to_message.text or message.reply_to_message.caption
 
-    if not url:
+    links, rename, folder = parse_payload(raw)
+
+    if not links:
         reply = message.reply_to_message
         if reply and reply.media:
             return queue_telegram_media_job(client, message, reply, dest, zip_output=zip_output)
-        if reply and (reply.text or reply.caption):
-            m = URL_RE.search(reply.text or reply.caption)
-            if m:
-                url = m.group(0).rstrip(").,]>\"'")
-            else:
-                return message.reply_text("⚠️ That reply doesn't contain a link or a file.")
-
-    if not url:
         return message.reply_text(
-            f"⚠️ Usage: <code>/{esc(cmd)} &lt;link&gt;</code>, or reply to a link/file with <code>/{esc(cmd)}</code>.")
+            f"⚠️ Usage: <code>/{esc(cmd)} &lt;link&gt;</code> [links…] [ | name] [#folder]\n"
+            f"or reply to a link/file with <code>/{esc(cmd)}</code>.")
 
-    # The yt-dlp-dedicated commands (WZML-X's naming: y/ytdl/yl/ytdlleech,
-    # plus our own yt) show a quality picker instead of blindly grabbing
-    # "best" — same idea as WZML-X's yt-dlp flow, and it sidesteps
-    # "Requested format not available" errors since the options offered
-    # come from formats that actually exist for this specific video.
-    if cmd in YT_DEDICATED_CMDS:
-        return show_quality_picker(client, message, url, dest, zip_output)
+    # Batch: one job per link; rename only applies to a single link.
+    for i, url in enumerate(links):
+        r = rename if len(links) == 1 else None
+        _dispatch_one(client, message, cmd, url, dest, zip_output, r, folder)
 
-    # Every other /m /l /zm /zl link also gets a picker when it looks like
-    # a media page (YouTube etc.) — WZML-X's mirror command does exactly
-    # this. Non-media links (direct files, magnets, galleries) skip the
-    # picker and go straight to the right downloader.
+
+def _dispatch_one(client, message, cmd, url, dest, zip_output, rename=None, folder=None):
+    if cmd == "torrent":
+        from .handlers_subproc import queue_subprocess_job
+        return queue_subprocess_job(client, message, "torrent", url,
+                                     dest="telegram" if dest != "drive" or not drive.enabled() else "telegram",
+                                     zip_output=zip_output)
+
+    # Media-page links get the WZML-X-style quality picker (real resolutions
+    # + sizes). Direct files/magnets skip it.
     host = _host_of(url)
-    if any(host == h or host.endswith("." + h) for h in config.YTDLP_AUTO_HOSTS):
-        return show_quality_picker(client, message, url, dest, zip_output)
+    is_media_page = any(host == h or host.endswith("." + h) for h in config.YTDLP_AUTO_HOSTS)
+    if is_media_page:
+        return show_quality_picker(client, message, url, dest, zip_output,
+                                    rename=rename, folder=folder)
+    dispatch_link(client, message, url, dest, zip_output=zip_output,
+                  rename=rename, folder=folder)
 
-    dispatch_link(client, message, url, dest, zip_output=zip_output)
 
-
-def show_quality_picker(client, message, url, dest, zip_output):
+def show_quality_picker(client, message, url, dest, zip_output, rename=None, folder=None):
     status = message.reply_text("🔎 Checking available qualities…")
     try:
         title, options = engine.probe_qualities(url, message.chat.id)
     except Exception as e:
         logger.warning(f"quality probe failed for {url}: {e}")
-        # Falls back to the normal auto-best path rather than dead-ending —
-        # not every yt-dlp-supported site exposes a formats list to probe.
         client.edit_message_text(message.chat.id, status.id,
-                                  "ℹ️ Couldn't list qualities for this link — downloading with auto-best instead.")
-        return dispatch_link(client, message, url, dest, zip_output=zip_output)
+                                  "ℹ️ Couldn't list qualities — downloading with auto-best instead.")
+        return dispatch_link(client, message, url, dest, zip_output=zip_output,
+                              rename=rename, folder=folder)
 
     token = state.new_quality_session(url, dest, zip_output, message.id)
+    state.QualityExtra.save(token, rename=rename, folder=folder)
     rows, row = [], []
     for label, selector in options:
         row.append(InlineKeyboardButton(label, callback_data=f"ytq:{token}:{selector}"))
@@ -429,6 +501,7 @@ def cb_quality_pick(client, cq):
     session = state.pop_quality_session(token)
     if not session:
         return cq.answer("This picker expired — send the link again.", show_alert=True)
+    extra = state.QualityExtra.take(token)
     cq.answer()
     safe_edit(cq, "⚡ Queued…")
     task_id = new_task_id()
@@ -438,7 +511,8 @@ def cb_quality_pick(client, cq):
     state.register_job(task_id, cq.message.chat.id, status.id, "yt-dlp", task_dir)
     state.task_queue.put((run_leech_job,
                            (client, cq.message.chat.id, status.id, session["url"], task_id,
-                            session["reply_to"], session["dest"], session["zip_output"], selector)))
+                            session["reply_to"], session["dest"], session["zip_output"], selector,
+                            extra.get("rename"), extra.get("folder"))))
 
 
 @app.on_callback_query(filters.regex(r"^ytqcancel:"))
@@ -542,12 +616,11 @@ GDRIVE_RE = re.compile(
 )
 
 
-def dispatch_link(client, message, url, dest, zip_output=False):
+def dispatch_link(client, message, url, dest, zip_output=False, rename=None, folder=None):
     """Routes url to the right downloader based on what it looks like —
-    magnet/torrent, Instagram, a known gallery site, a Google Drive
-    file/folder link, or the generic yt-dlp/direct-download path —
-    carrying `dest` (telegram/drive) and `zip_output` through to
-    whichever job actually runs."""
+    magnet/torrent, Instagram, a Google Drive file/folder link, or the
+    generic yt-dlp/direct-download path — carrying dest/zip/rename/folder
+    through to whichever job actually runs."""
     host = _host_of(url)
 
     if url.startswith("magnet:") or url.lower().endswith(".torrent"):
@@ -564,17 +637,7 @@ def dispatch_link(client, message, url, dest, zip_output=False):
         from .handlers_instagram import dispatch_instagram
         return dispatch_instagram(client, message, url, dest)
 
-    if any(host == b or host.endswith("." + b) for b in config.BLOCKED_GALLERY_HOSTS):
-        return message.reply_text(
-            "🚫 That site isn't supported here — it's a dedicated adult-content "
-            "gallery/leak board rather than a general art or photo platform."
-        )
-
-    if any(host == h or host.endswith("." + h) for h in config.GALLERY_HOSTS):
-        from .handlers_subproc import queue_subprocess_job
-        return queue_subprocess_job(client, message, "gallery", url, dest, zip_output)
-
-    queue_leech_job(client, message, url, dest, zip_output)
+    queue_leech_job(client, message, url, dest, zip_output, rename=rename, folder=folder)
 
 
 def queue_gdrive_job(client, message, file_id, dest, zip_output=False):
@@ -716,17 +779,20 @@ def _download_gdrive_folder(client, chat_id, msg_id, task_id, folder_meta, task_
 
 
 
-def queue_leech_job(client, message, url, dest, zip_output=False, format_selector=None):
+def queue_leech_job(client, message, url, dest, zip_output=False, format_selector=None,
+                    rename=None, folder=None):
     task_id = new_task_id()
     tag = f" 📦→{config.DEST_LABEL[dest]}" if zip_output else f" →{config.DEST_LABEL[dest]}"
     status = message.reply_text(f"🔎 Queued{tag} — <code>{esc(task_id)}</code>", reply_markup=cancel_kb(task_id))
     task_dir = os.path.join(config.DOWNLOAD_DIR, task_id)
     state.register_job(task_id, message.chat.id, status.id, "yt-dlp", task_dir)
     state.task_queue.put((run_leech_job,
-                           (client, message.chat.id, status.id, url, task_id, message.id, dest, zip_output, format_selector)))
+                           (client, message.chat.id, status.id, url, task_id, message.id, dest,
+                            zip_output, format_selector, rename, folder)))
 
 
-def run_leech_job(client, chat_id, msg_id, url, task_id, reply_to, dest, zip_output=False, format_selector=None):
+def run_leech_job(client, chat_id, msg_id, url, task_id, reply_to, dest, zip_output=False,
+                  format_selector=None, rename=None, folder=None):
     task_dir = os.path.join(config.DOWNLOAD_DIR, task_id)
     try:
         if not state.ensure_free(config.MIN_FREE_MB):
@@ -772,15 +838,29 @@ def run_leech_job(client, chat_id, msg_id, url, task_id, reply_to, dest, zip_out
         file_kb = None
 
         if dest == "telegram":
+            if rename:
+                # Rename without touching the extension: swap basename only.
+                ext = os.path.splitext(fpath)[1]
+                new_path = os.path.join(os.path.dirname(fpath), rename + ext)
+                try:
+                    os.rename(fpath, new_path)
+                    fpath = new_path
+                except OSError:
+                    pass
+                size = os.path.getsize(fpath)
             throttled_edit(client, chat_id, msg_id, f"☁️ Uploading… (<code>{fmtsz(size)}</code>)", markup=cancel_kb(task_id), force=True)
             uploader.upload_to_telegram(client, chat_id, fpath, msg_id, reply_to=reply_to, task_id=task_id,
                                         video_meta=engine.probe_video_meta(fpath))
         elif dest == "drive":
             throttled_edit(client, chat_id, msg_id, "☁️ Uploading to Drive…", markup=cancel_kb(task_id), force=True)
-            dinfo = drive.upload_file_full(fpath, task_id=task_id)
+            dinfo = drive.upload_file_full(fpath, task_id=task_id, rename=rename,
+                                           folder=folder, chat_id=chat_id)
             if dinfo:
                 links.append(dinfo["link"])
                 file_kb = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔗 Get link", callback_data=f"qlink:{dinfo['id']}"),
+                    InlineKeyboardButton("📥 Send to Telegram", callback_data=f"qsnd:{dinfo['id']}"),
+                ], [
                     InlineKeyboardButton("✏️ Rename", callback_data=f"qren:{dinfo['id']}"),
                     InlineKeyboardButton("🗑 Delete", callback_data=f"qdel:{dinfo['id']}"),
                 ]])
@@ -819,9 +899,12 @@ def auto_leech(client, message):
         kind, target = pending
         if kind == "cookie_rename":
             return handle_cookie_rename(client, message, target)
+        if isinstance(kind, tuple) and kind[0] == "drive_rename":
+            from .handlers_drive import handle_drive_rename
+            return handle_drive_rename(client, message, kind[1], target)
         if kind == "drive_rename":
             from .handlers_drive import handle_drive_rename
-            return handle_drive_rename(client, message, target)
+            return handle_drive_rename(client, message, state.DEFAULT_ACCOUNT, target)
         if kind == "drive_newfolder":
             from .handlers_drive import handle_drive_new_folder
             return handle_drive_new_folder(client, message, target)
@@ -843,4 +926,8 @@ def auto_leech(client, message):
         return
     url = m.group(0).rstrip(").,]>\"'")
     logger.info(f"chat {message.chat.id} auto-leech: {url}")
-    dispatch_link(client, message, url, "telegram")
+
+    # Same grammar as /m: "| name" rename and "#folder" Drive routing.
+    from .utils import parse_payload
+    _, rename, folder = parse_payload(text)
+    dispatch_link(client, message, url, "telegram", rename=rename, folder=folder)

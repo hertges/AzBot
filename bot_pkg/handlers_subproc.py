@@ -7,7 +7,7 @@ from . import config, state, drive, uploader, log
 from .core import app
 from .utils import bar, throttled_edit, new_task_id, zip_dir, fmtsz, autoclean_if_enabled, guarded, esc
 from .dispatcher import LiveDispatcher
-from .handlers_core import Authorized, cancel_kb, _host_of
+from .handlers_core import Authorized, cancel_kb
 
 logger = log.get(__name__)
 
@@ -43,31 +43,23 @@ def _parse_aria2_error(lines):
     return None
 
 
-@app.on_message(filters.command(["torrent", "gallery", "clone"]) & Authorized)
+@app.on_message(filters.command(["gallery", "clone"]) & Authorized)
 @guarded
 def cmd_subprocess(client, message):
+    from .utils import parse_payload
     cmd = message.command[0]
-    parts = message.text.split(maxsplit=1)
-    if len(parts) < 2 or not parts[1].strip():
-        return message.reply_text(f"⚠️ Usage: <code>/{esc(cmd)} &lt;url&gt;</code>")
-    url = parts[1].strip()
-
-    if cmd == "gallery":
-        host = _host_of(url)
-        if any(host == b or host.endswith("." + b) for b in config.BLOCKED_GALLERY_HOSTS):
-            return message.reply_text(
-                "🚫 That site isn't supported here — it's a dedicated adult-content "
-                "gallery/leak board rather than a general art or photo platform."
-            )
-
-    queue_subprocess_job(client, message, cmd, url, dest="telegram")
+    raw = message.text.split(maxsplit=1)[1] if len(message.text.split(maxsplit=1)) > 1 else ""
+    links, rename, folder = parse_payload(raw)
+    if not links:
+        return message.reply_text(f"⚠️ Usage: <code>/{esc(cmd)} &lt;url&gt;</code> [links…] [#folder]")
+    for url in links:
+        queue_subprocess_job(client, message, cmd, url, dest="telegram")
 
 
 def queue_subprocess_job(client, message, cmd, url, dest="telegram", zip_output=False):
     if not state.ensure_free(config.MIN_FREE_MB):
         return message.reply_text("❌ Disk full, try again later.")
     task_id = new_task_id()
-    task_dir = os.path.join(config.DOWNLOAD_DIR, task_id)
     tag = f"📦→{config.DEST_LABEL[dest]}" if zip_output else f"→{config.DEST_LABEL[dest]}"
     status = message.reply_text(
         f"⚡ Queued <code>/{esc(cmd)}</code> {tag} — <code>{esc(task_id)}</code>",
@@ -76,7 +68,7 @@ def queue_subprocess_job(client, message, cmd, url, dest="telegram", zip_output=
     )
     state.register_job(task_id, message.chat.id, status.id, cmd, task_dir)
     state.task_queue.put((run_subprocess_job,
-                           (client, message.chat.id, status.id, cmd, esc(url), task_id, message.id, dest, zip_output)))
+                           (client, message.chat.id, status.id, cmd, url, task_id, message.id, dest, zip_output)))
 
 
 def run_subprocess_job(client, chat_id, msg_id, cmd, url, task_id, reply_to, dest="telegram", zip_output=False):

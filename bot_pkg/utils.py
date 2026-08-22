@@ -1,4 +1,4 @@
-import math, time, threading, os, zipfile, uuid, html as _html
+import math, time, threading, os, re, zipfile, uuid, html as _html
 
 from pyrogram.errors import FloodWait, MessageNotModified
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -15,6 +15,34 @@ def esc(s):
     (the source of Telegram's ENTITY_BOUNDS_INVALID crashes). Only & <>
     need escaping; markdown metacharacters are literal in HTML mode."""
     return _html.escape(str(s), quote=False)
+
+
+# ── Command payload parsing (WZML-X-style raw/batch support) ────────────
+# Supported in every download command (/m /l /yt /torrent /ig …):
+#   • multiple links separated by whitespace → one job per link (batch)
+#   • "link | newname"  → saved/uploaded as newname (extension untouched)
+#   • "#folder" anywhere → Drive uploads go into that folder (created on
+#     demand inside the account's root); also names a zip when zipping.
+def parse_payload(raw):
+    """Returns (links, rename, folder).
+    links: list of URLs/magnets in input order. rename/folder may be None."""
+    if not raw:
+        return [], None, None
+    raw = raw.strip()
+    folder = None
+    fm = re.search(r"#([^\s|]+)", raw)
+    if fm:
+        folder = fm.group(1).strip()
+        raw = (raw[:fm.start()] + " " + raw[fm.end():])
+
+    rename = None
+    parts = [p.strip() for p in raw.split("|", 1)]
+    if len(parts) == 2 and parts[1] and not parts[1].startswith("http"):
+        raw, rename = parts[0], parts[1]
+
+    links = [u.rstrip(").,]>\"'")
+             for u in re.findall(r"(?:magnet:\?xt=urn:btih:[A-Za-z0-9]\S*|https?://\S+)", raw)]
+    return links, rename, folder
 
 def cancel_kb(task_id):
     return InlineKeyboardMarkup([[InlineKeyboardButton("🛑 Stop", callback_data=f"cancel:{task_id}")]])

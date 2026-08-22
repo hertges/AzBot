@@ -14,6 +14,7 @@ from .handlers_shell import register_shell_handlers, SHELL_COMMAND_NAMES
 def cmd_stats(client, message):
     free = state.disk_free_mb()
     total = shutil.disk_usage(config.DOWNLOAD_DIR).total // (1024 * 1024)
+    rss = int(_rss_mb())
     with state.jobs_lock:
         jobs = dict(state.ACTIVE_JOBS)
     lines = [
@@ -23,10 +24,23 @@ def cmd_stats(client, message):
     message.reply_text(
         f"📊 <b>Stats</b>\n\n"
         f"💾 Disk: <code>{free} MB</code> free / <code>{total} MB</code>\n"
+        f"🧠 RAM: <code>{rss} MB</code> used by bot\n"
         f"⚙️ Active: <code>{len(jobs)}</code> | Queued: <code>{state.task_queue.qsize()}</code>\n"
-        f"☁️ Drive: {'enabled' if drive.enabled() else 'not configured'}\n\n"
-        f"<b>Active jobs:</b>\n" + ("\n".join(lines) if lines else "  <i>none</i>"),
+        f"☁️ Drive accounts: <code>{len(config.DRIVE_ACCOUNTS)}</code>"
+        + (f" (this chat: <code>{state.get_drive_account(message.chat.id)}</code>)" if config.DRIVE_ACCOUNTS else "")
+        + "\n\n<b>Active jobs:</b>\n" + ("\n".join(lines) if lines else "  <i>none</i>"),
     )
+
+
+def _rss_mb():
+    try:
+        with open("/proc/self/status") as fh:
+            for line in fh:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024
+    except OSError:
+        pass
+    return 0
 
 
 @app.on_message(filters.command("clean") & Authorized)

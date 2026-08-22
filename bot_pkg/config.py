@@ -1,3 +1,4 @@
+import re
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -15,9 +16,39 @@ ADMIN_ID  = os.environ.get("ADMIN_ID", "").strip()
 
 # ── Google Drive (optional secondary destination) ──────────────────────
 DRIVE_FOLDER_ID   = os.environ.get("DRIVE_FOLDER_ID", "").strip()
-GCP_CLIENT_ID     = os.environ.get("GCP_CLIENT_ID", "").strip()
-GCP_CLIENT_SECRET = os.environ.get("GCP_CLIENT_SECRET", "").strip()
-GCP_REFRESH_TOKEN = os.environ.get("GCP_REFRESH_TOKEN", "").strip()
+
+def _parse_drive_accounts():
+    """Multi-account Drive support. Two env styles are accepted:
+
+    1. Single account (backwards compatible):
+         GCP_CLIENT_ID=... GCP_CLIENT_SECRET=... GCP_REFRESH_TOKEN=...
+       → one account named "main".
+
+    2. Multiple accounts, numbered:
+         GDrive_1_CLIENT_ID / GDrive_1_CLIENT_SECRET / GDrive_1_REFRESH_TOKEN
+         GDrive_2_CLIENT_ID / ...
+       (any suffix works: GDrive_work_..., GDrive_2_...). Names come from the
+       suffix — "work", "2" — so /settings can show them by name.
+    """
+    accounts = {}
+    single = (os.environ.get("GCP_CLIENT_ID", "").strip(),
+              os.environ.get("GCP_CLIENT_SECRET", "").strip(),
+              os.environ.get("GCP_REFRESH_TOKEN", "").strip())
+    if all(single):
+        accounts["main"] = {"client_id": single[0], "client_secret": single[1],
+                            "refresh_token": single[2]}
+    for key, val in os.environ.items():
+        m = re.match(r"^GDrive_(.+?)_(CLIENT_ID|CLIENT_SECRET|REFRESH_TOKEN)$", key,
+                     re.IGNORECASE)
+        if not m:
+            continue
+        name, field = m.group(1).strip().lower(), m.group(2).upper()
+        accounts.setdefault(name, {"client_id": "", "client_secret": "", "refresh_token": ""})
+        accounts[name][{"CLIENT_ID": "client_id", "CLIENT_SECRET": "client_secret",
+                        "REFRESH_TOKEN": "refresh_token"}[field]] = val.strip()
+    return {n: a for n, a in accounts.items() if all(a.values())}
+
+DRIVE_ACCOUNTS = _parse_drive_accounts()
 
 if not (API_ID and API_HASH and BOT_TOKEN):
     print("CRITICAL: API_ID / API_HASH / BOT_TOKEN missing! See .env.example")
@@ -33,6 +64,9 @@ SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
 USERS_FILE    = os.path.join(DATA_DIR, "users.json")
 COOKIES_DIR   = os.path.join(DATA_DIR, "cookies")
 os.makedirs(COOKIES_DIR, exist_ok=True)
+# Per-user, per-type Instagram index ledgers (data/indexes/<chat>/<user>.<type>.txt)
+INDEX_DIR     = os.path.join(DATA_DIR, "indexes")
+os.makedirs(INDEX_DIR, exist_ok=True)
 
 MIN_FREE_MB = 300
 
@@ -77,22 +111,6 @@ MAGNET_RE = __import__("re").compile(r"magnet:\?xt=urn:btih:[A-Za-z0-9]+\S*")
 DEST_LABEL = {"telegram": "📱 Telegram", "drive": "☁️ Drive"}
 
 IG_HOSTS = ("instagram.com",)
-
-# General art/photo platforms gallery-dl is pointed at generically — see
-# BLOCKED_GALLERY_HOSTS below for what's deliberately excluded.
-GALLERY_HOSTS = (
-    "imgur.com", "deviantart.com", "artstation.com", "flickr.com",
-    "pixiv.net", "tumblr.com", "500px.com", "pinterest.com",
-)
-
-# gallery-dl ships extractors for these out of the box. We don't build
-# curated auto-detection for them and actively refuse them in /gallery:
-# they're dedicated adult-content boards, and in the case of the
-# coomer/kemono/bunkr/cyberdrop family, they specifically exist to
-# redistribute paywalled creator content (OnlyFans/Patreon) without
-# consent. Everything else gallery-dl supports (art/photo platforms,
-# forums, image hosts, etc.) works normally through /gallery.
-BLOCKED_GALLERY_HOSTS = ()
 
 SHELL_TIMEOUT_S = 60
 

@@ -75,6 +75,74 @@ def get_as_document(chat_id):
 def set_as_document(chat_id, value):
     set_pref(chat_id, "as_document", bool(value))
 
+# ── Drive account selection (multi-account) ─────────────────────────────
+# Accounts themselves come from env (config.DRIVE_ACCOUNTS). Per chat we
+# store which one to use; default is the first configured account.
+DEFAULT_ACCOUNT = next(iter(config.DRIVE_ACCOUNTS), None)
+
+def get_drive_account(chat_id):
+    name = get_prefs(chat_id).get("drive_account") or DEFAULT_ACCOUNT
+    if name not in config.DRIVE_ACCOUNTS:
+        name = DEFAULT_ACCOUNT
+        if name:
+            set_pref(chat_id, "drive_account", name)
+    return name
+
+def set_drive_account(chat_id, name):
+    if name not in config.DRIVE_ACCOUNTS:
+        return False
+    set_pref(chat_id, "drive_account", name)
+    invalidate_listing(chat_id)
+    reset_drive_nav(chat_id)
+    return True
+
+# ── Instagram index ledger (local, per chat / user / type) ──────────────
+# One SQLite-free flat file per (chat, username, type) under
+# data/indexes/<chat>/ — gallery-dl's --download-archive format (one id per
+# line). Local by design: nothing Instagram-related spreads into the user's
+# Drive. /igindex manages and deletes them.
+def index_path(chat_id, username, archive_type):
+    d = os.path.join(config.INDEX_DIR, str(chat_id))
+    os.makedirs(d, exist_ok=True)
+    safe_u = re.sub(r"[^A-Za-z0-9._-]", "_", username)
+    return os.path.join(d, f"{safe_u}.{archive_type}.txt")
+
+def ig_index_exists(chat_id, username, archive_type):
+    return os.path.exists(index_path(chat_id, username, archive_type))
+
+def list_ig_indexes(chat_id):
+    """[(username, type), ...] found for this chat."""
+    d = os.path.join(config.INDEX_DIR, str(chat_id))
+    out = []
+    if os.path.isdir(d):
+        for f in sorted(os.listdir(d)):
+            m = re.match(r"^(.+)\.(posts|reels|stories|highlights|tagged)\.txt$", f)
+            if m and os.path.getsize(os.path.join(d, f)) >= 0:
+                out.append((m.group(1), m.group(2)))
+    return out
+
+def delete_ig_index(chat_id, username=None, archive_type=None):
+    """Deletes matching ledgers. All args None → wipe every index for the
+    chat. Returns count deleted."""
+    d = os.path.join(config.INDEX_DIR, str(chat_id))
+    if not os.path.isdir(d):
+        return 0
+    n = 0
+    for f in os.listdir(d):
+        m = re.match(r"^(.+)\.(posts|reels|stories|highlights|tagged)\.txt$", f)
+        if not m:
+            continue
+        u, t = m.group(1), m.group(2)
+        if username and re.sub(r"[^A-Za-z0-9._-]", "_", username) != u:
+            continue
+        if archive_type and t != archive_type:
+            continue
+        try:
+            os.remove(os.path.join(d, f)); n += 1
+        except OSError:
+            pass
+    return n
+
 def cookie_path(name="global"):
     safe = re.sub(r"[^\w\-]", "_", name)
     return os.path.join(config.COOKIES_DIR, f"{safe}.txt")
@@ -197,6 +265,20 @@ def get_quality_session(token):
 
 def pop_quality_session(token):
     return _quality_sessions.pop(token, None)
+
+class QualityExtra:
+    """Rename/folder tags attached to a picker session (kept separate so
+    the session dict shape stays stable)."""
+    _extra = {}
+
+    @classmethod
+    def save(cls, token, rename=None, folder=None):
+        if rename or folder:
+            cls._extra[token] = {"rename": rename, "folder": folder}
+
+    @classmethod
+    def take(cls, token):
+        return cls._extra.pop(token, {"rename": None, "folder": None})
 
 # ── Pending /ig multi-select archive-type sessions ──────────────────────
 _ig_picker_sessions = {}

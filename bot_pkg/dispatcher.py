@@ -12,7 +12,8 @@ class LiveDispatcher:
     """Watches task_dir for finished files and uploads each one as soon as
     it stops changing, instead of waiting for the whole job to finish."""
 
-    def __init__(self, client, chat_id, msg_id, task_dir, dest, reply_to=None, task_id=None, max_workers=2):
+    def __init__(self, client, chat_id, msg_id, task_dir, dest, reply_to=None, task_id=None,
+                 max_workers=2, rename=None, folder=None):
         self.client = client
         self.chat_id = chat_id
         self.msg_id = msg_id
@@ -20,6 +21,8 @@ class LiveDispatcher:
         self.dest = dest
         self.reply_to = reply_to
         self.task_id = task_id
+        self.rename = rename
+        self.folder = folder
         self.seen = set()
         self.sent = 0
         self.errors = []
@@ -76,7 +79,9 @@ class LiveDispatcher:
                 uploader.upload_to_telegram(self.client, self.chat_id, fpath, self.msg_id,
                                              reply_to=self.reply_to, task_id=self.task_id)
             if self.dest in ("drive", "both") and drive.enabled():
-                link = drive.upload_file(fpath, task_id=self.task_id)
+                link = drive.upload_file(fpath, task_id=self.task_id,
+                                         rename=self.rename, folder=self.folder,
+                                         chat_id=self.chat_id)
                 logger.info(f"uploaded to Drive: {fpath} -> {link}")
             self.sent += 1
         except state.CancelledError:

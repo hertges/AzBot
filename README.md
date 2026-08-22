@@ -36,9 +36,42 @@ use — there's no per-chat setting to toggle:
 - `/zm <link>` / `/zl <link>` → same as `/m`/`/l`, but zipped into one
   file first.
 
-All four auto-detect the link type — YouTube/etc via yt-dlp, Instagram
-(post or whole profile), magnet/torrent, or a general gallery site — same
-as the original bot's `/m`/`/l` dispatch.
+## Payload grammar (every download command)
+
+- **Batch**: `/l <link1> <link2> <link3>` — one job per link, in order.
+  Rename applies only when there's exactly one link (otherwise names would
+  collide).
+- **Rename**: `/m <link> | myname` — the final file is named `myname`; the
+  extension is never touched (`myname.mp4` stays `.mp4`, an extensionless
+  name keeps the file's own extension).
+- **Drive folder**: `/m <link> #holiday` — uploads into the `holiday`
+  folder of the selected Drive account (created on demand). Works with
+  `/m`, `/zm`, `/zipd` and plain-paste mirrors.
+
+## Multi-account Drive
+
+Define several accounts in `.env` (`GDrive_work_*`, `GDrive_2_*`, …) and
+each chat picks its own in `/settings → ☁️ Drive account`. `/drive`
+browsing, `/drivesearch`, `/m` uploads and `#folder` creation all follow
+that selection. Instagram indexes stay local regardless.
+
+## Instagram indexing (local, per user/type)
+
+Archive indexes live under `data/indexes/<chat>/<user>.<type>.txt` — one
+flat ledger per chat/user/type. **Nothing is written to your Drive.**
+`/igindex` lists every index for this chat with entry counts and lets you
+delete selectively: one type of one user (just Stories), everything of one
+user, or wipe all. Deleting an index makes the next archive re-fetch from
+scratch.
+
+## Zip / unzip
+
+- `/zip` — reply to a file (or pass direct links) → one zip sent here.
+  Supports batch links + `| name.zip`.
+- `/zipd` — same, but the archive goes to the selected Drive account
+  (`#folder` works).
+- `/unzip` — reply to an archive (`.zip .rar .7z .tar …`) or pass its
+  link; every inner file is sent to this chat.
 
 ## Commands
 
@@ -205,14 +238,9 @@ rather than guessing at the whole thing.
 
 ## What's intentionally not here
 
-`/gallery`, `/m`, and `/l` all refuse a fixed list of dedicated
-adult-content boards and paywalled-content leak sites (rule34, e621,
-nhentai, gelbooru, danbooru, coomer/kemono, bunkr, cyberdrop, and their
-mirrors) — see `BLOCKED_GALLERY_HOSTS` in `bot_pkg/config.py`. Everything
-else `gallery-dl`/`yt-dlp` support (art platforms, forums, image hosts,
-mainstream video/social sites) works normally. This list is the one thing
-I won't add back regardless of configuration — everything else in this
-README is available and yours to lock down or loosen as you see fit.
+The old curated "gallery site" allowlist/blocklist is gone entirely —
+`/gallery` now runs gallery-dl against whatever URL you give it, and
+everything `gallery-dl`/`yt-dlp` support works normally.
 
 ## What changed from the original `pyTelegramBotAPI` version
 

@@ -100,8 +100,9 @@ def start():
     _lock_fh = _acquire_single_instance_lock()
     from . import engine
     engine.update_yt_dlp(restart_on_update=True)  # safe here — nothing is serving yet
-    from . import handlers_core, handlers_admin, handlers_shell, handlers_subproc, handlers_instagram, handlers_drive, handlers_fallback  # noqa: F401
-    logger.info("handlers registered: core, admin+shell, subproc, instagram, drive, fallback")
+    from . import (handlers_core, handlers_admin, handlers_shell, handlers_subproc,
+                   handlers_instagram, handlers_drive, handlers_zip, handlers_fallback)  # noqa: F401
+    logger.info("handlers registered: core, admin+shell, subproc, instagram+zip, drive, fallback")
     _start_workers()
     threading.Thread(target=_purge_loop, daemon=True).start()
     threading.Thread(target=_yt_dlp_update_loop, daemon=True).start()
