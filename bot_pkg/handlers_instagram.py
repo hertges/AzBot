@@ -5,7 +5,7 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from . import config, state, drive, log
 from .core import app
-from .utils import new_task_id, throttled_edit, autoclean_if_enabled, guarded, safe_edit
+from .utils import new_task_id, throttled_edit, autoclean_if_enabled, guarded, safe_edit, esc
 from .dispatcher import LiveDispatcher
 from .handlers_core import Authorized, cancel_kb
 
@@ -49,9 +49,9 @@ def dispatch_instagram(client, message, url, dest):
 
 def _ig_picker_text(username, dest):
     return (
-        f"📷 **@{username}** — pick what to archive (→ {config.DEST_LABEL[dest]}):\n\n"
+        f"📷 <b>@{esc(username)}</b> — pick what to archive (→ {config.DEST_LABEL[dest]}):\n\n"
         f"Tap to select/deselect, then ▶️ Start. Stories are on by default. "
-        f"Stories & Highlights need a logged-in cookie profile (`/cookie`), "
+        f"Stories &amp; Highlights need a logged-in cookie profile (<code>/cookie</code>), "
         f"since Instagram doesn't serve those to logged-out requests."
     )
 
@@ -80,7 +80,9 @@ def _ig_picker_kb(token):
 def cmd_ig(client, message):
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2:
-        return message.reply_text("⚠️ `/ig <post_url>` or `/ig <profile_url>` (leeches to Telegram — use `/m <url>` to mirror to Drive instead)")
+        return message.reply_text(
+            "⚠️ <code>/ig &lt;post_url&gt;</code> or <code>/ig &lt;profile_url&gt;</code> "
+            "(leeches to Telegram — use <code>/m &lt;url&gt;</code> to mirror to Drive instead)")
     dispatch_instagram(client, message, parts[1].strip(), "telegram")
 
 
@@ -117,7 +119,7 @@ def cb_ig_start(client, cq):
     username, dest = s["username"], s["dest"]
     types = sorted(s["selected"], key=["posts", "reels", "stories", "highlights", "tagged"].index)
     cq.answer(f"Queued {len(types)} archive(s) for @{username}")
-    safe_edit(cq, f"⚡ Queued **{', '.join(types)}** for @{username} → {config.DEST_LABEL[dest]}…")
+    safe_edit(cq, f"⚡ Queued <b>{esc(', '.join(types))}</b> for @{esc(username)} → {config.DEST_LABEL[dest]}…")
 
     if not state.ensure_free(config.MIN_FREE_MB):
         return cq.message.reply_text("❌ Disk full.")
@@ -125,8 +127,9 @@ def cb_ig_start(client, cq):
     chat_id = cq.message.chat.id
     for archive_type in types:
         task_id = new_task_id()
-        status = cq.message.reply_text(f"⚡ Queued `{archive_type}` for @{username} — `{task_id}`",
-                                        reply_markup=cancel_kb(task_id))
+        status = cq.message.reply_text(
+            f"⚡ Queued <code>{esc(archive_type)}</code> for @{esc(username)} — <code>{esc(task_id)}</code>",
+            reply_markup=cancel_kb(task_id))
         task_dir = os.path.join(config.DOWNLOAD_DIR, task_id)
         state.register_job(task_id, chat_id, status.id, f"ig:{archive_type}", task_dir)
         state.task_queue.put((run_ig_archive_job,
@@ -212,7 +215,7 @@ def run_ig_archive_job(client, chat_id, msg_id, archive_type, username, task_id,
             if now - last_edit >= 3:
                 last_edit = now
                 throttled_edit(client, chat_id, msg_id,
-                                f"📷 @{username} — {archive_type}\n`{line.strip()[:120]}`",
+                                f"📷 @{esc(username)} — {archive_type}\n<code>{esc(line.strip()[:120])}</code>",
                                 markup=cancel_kb(task_id))
         proc.wait()
 
@@ -244,13 +247,13 @@ def run_ig_archive_job(client, chat_id, msg_id, archive_type, username, task_id,
             return throttled_edit(client, chat_id, msg_id, "🛑 Cancelled.", force=True)
 
         if sent == 0:
-            msg = f"ℹ️ Nothing new to fetch for @{username} ({archive_type})."
+            msg = f"ℹ️ Nothing new to fetch for @{esc(username)} ({archive_type})."
             tail = "\n".join(full_log[-10:])
             if "error" in tail.lower() or "403" in tail or "login" in tail.lower():
-                msg = f"❌ Couldn't fetch @{username} ({archive_type}) — may need a fresh cookie.\n```\n{tail[-1200:]}\n```"
+                msg = f"❌ Couldn't fetch @{esc(username)} ({archive_type}) — may need a fresh cookie.\n<pre>{esc(tail[-1200:])}</pre>"
             return throttled_edit(client, chat_id, msg_id, msg, force=True)
 
-        summary = f"✅ @{username} ({archive_type}) — {sent} new file(s) → {config.DEST_LABEL[dest]}"
+        summary = f"✅ @{esc(username)} ({archive_type}) — {sent} new file(s) → {config.DEST_LABEL[dest]}"
         if errors:
             summary += f"\n⚠️ {len(errors)} failed."
         throttled_edit(client, chat_id, msg_id, summary, force=True)
@@ -258,7 +261,7 @@ def run_ig_archive_job(client, chat_id, msg_id, archive_type, username, task_id,
 
     except Exception as e:
         logger.exception(f"[{task_id}] /ig job failed")
-        throttled_edit(client, chat_id, msg_id, f"❌ `{str(e)[:300]}`", force=True)
+        throttled_edit(client, chat_id, msg_id, f"❌ <code>{esc(str(e)[:300])}</code>", force=True)
     finally:
         state.drop_job(task_id)
         shutil.rmtree(task_dir, ignore_errors=True)

@@ -6,7 +6,8 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 
 from . import config, state, engine, uploader, drive, log
 from .core import app
-from .utils import new_task_id, throttled_edit, fmtsz, fix_unknown_ext, cancel_kb, bar, smooth_speed, autoclean_if_enabled, guarded, safe_edit
+from .utils import (new_task_id, throttled_edit, fmtsz, fix_unknown_ext, cancel_kb, bar,
+                    smooth_speed, autoclean_if_enabled, guarded, safe_edit, esc)
 from .dispatcher import LiveDispatcher
 
 logger = log.get(__name__)
@@ -62,17 +63,17 @@ def render_help(chat_id, msg_id=None):
          InlineKeyboardButton("🔧 Admin", callback_data="help:admin")],
     ])
     text = (
-        "👋 **AzLeechBot**\n\n"
+        "👋 <b>AzLeechBot</b>\n\n"
         "Paste a link — YouTube, Instagram, TikTok, Twitter/X, Reddit, a "
-        "magnet link, hundreds of other sites — and I'll **leech** it "
+        "magnet link, hundreds of other sites — and I'll <b>leech</b> it "
         "(send it back here) automatically. No command needed for that.\n\n"
-        "`/m <link>` — **mirror** to Drive instead\n"
-        "`/l <link>` — **leech** to Telegram (same as pasting with no command)\n"
-        "`/zm` / `/zl` — same, zipped into one file first\n\n"
+        "<code>/m &lt;link&gt;</code> — <b>mirror</b> to Drive instead\n"
+        "<code>/l &lt;link&gt;</code> — <b>leech</b> to Telegram (same as pasting with no command)\n"
+        "<code>/zm</code> / <code>/zl</code> — same, zipped into one file first\n\n"
         "Uploads go over Telegram's MTProto layer directly (Pyrogram), so "
         "the 50MB Bot API limit doesn't apply — files up to Telegram's real "
         "~2GB per-file cap go through natively.\n\n"
-        "`/settings` — toggle auto-clean for this chat (tidies up command + "
+        "<code>/settings</code> — toggle auto-clean for this chat (tidies up command + "
         "status messages once a job finishes)\n\n"
         "Tap a section below for the rest of the commands."
     )
@@ -83,39 +84,40 @@ def render_help(chat_id, msg_id=None):
 
 
 HELP = {
-    "dl": ("⬇️ **Downloads**\n\n"
-           "Paste a link — auto-**leeched** to Telegram, no command needed.\n\n"
-           "`/m <link>` — mirror to Drive  •  `/l <link>` — leech to Telegram\n"
-           "`/zm <link>` / `/zl <link>` — same, zipped first\n"
-           "`/yt <link>` — alias for `/l` (leech). `/y`/`/ytdl` — alias for `/m` "
-           "(mirror) and `/yl`/`/ytdlleech` — alias for `/l` (leech), matching "
+    "dl": ("⬇️ <b>Downloads</b>\n\n"
+           "Paste a link — auto-<b>leeched</b> to Telegram, no command needed.\n\n"
+           "<code>/m &lt;link&gt;</code> — mirror to Drive  •  <code>/l &lt;link&gt;</code> — leech to Telegram\n"
+           "<code>/zm &lt;link&gt;</code> / <code>/zl &lt;link&gt;</code> — same, zipped first\n"
+           "<code>/yt &lt;link&gt;</code> — alias for <code>/l</code> (leech). <code>/y</code>/<code>/ytdl</code> — alias for <code>/m</code> "
+           "(mirror) and <code>/yl</code>/<code>/ytdlleech</code> — alias for <code>/l</code> (leech), matching "
            "WZML-X's command names.\n\n"
            "All auto-detect the link type (YouTube/etc, Instagram, "
-           "magnet/torrent, gallery site) same as the original bot's `/m`/`/l`.\n\n"
-           "`/torrent <magnet or .torrent url>` — force aria2c, leeches to Telegram\n"
-           "`/gallery <url>` — force gallery-dl, leeches to Telegram\n"
-           "`/clone <url>` — mirror a website with wget, leeches to Telegram\n"
-           "`/drive` — browse your Drive folder: navigate into folders, see file "
-           "sizes, rename/delete anything, make new folders • `/drivesearch <query>`\n\n"
+           "magnet/torrent, gallery site) same as the original bot's <code>/m</code>/<code>/l</code>.\n\n"
+           "<code>/torrent &lt;magnet or .torrent url&gt;</code> — force aria2c, leeches to Telegram\n"
+           "<code>/gallery &lt;url&gt;</code> — force gallery-dl, leeches to Telegram\n"
+           "<code>/clone &lt;url&gt;</code> — mirror a website with wget, leeches to Telegram\n"
+           "<code>/drive</code> — browse your Drive folder: navigate into folders, see file "
+           "sizes, rename/delete anything, make new folders • <code>/drivesearch &lt;query&gt;</code>\n\n"
            "Magnet links are auto-detected in plain messages too, no command needed."),
-    "ig": ("📷 **Instagram**\n\n"
-           "`<post/reel url>` — just paste it, leeched like any other link\n"
-           "`/ig <profile_url>` — multi-select picker: tap Posts/Reels/Stories/"
+    "ig": ("📷 <b>Instagram</b>\n\n"
+           "<code>&lt;post/reel url&gt;</code> — just paste it, leeched like any other link\n"
+           "<code>/ig &lt;profile_url&gt;</code> — multi-select picker: tap Posts/Reels/Stories/"
            "Highlights/Tagged to toggle each on/off, then ▶️ Start to archive all "
            "selected at once (Stories is on by default). Leeches to Telegram.\n"
-           "`/m <profile_url>` — same picker, but mirrors to Drive instead\n\n"
-           "Stories & highlights need a logged-in cookie profile (`/cookie`)."),
-    "cookies": ("🍪 **Cookies**\n\n"
-                "`/cookie` — list profiles\n`/cookie <name>` — switch active profile\n"
-                "Reply to a Netscape-format `cookies.txt` with `/cookie <name>` to add one.\n\n"
+           "<code>/m &lt;profile_url&gt;</code> — same picker, but mirrors to Drive instead\n\n"
+           "Stories &amp; highlights need a logged-in cookie profile (<code>/cookie</code>)."),
+    "cookies": ("🍪 <b>Cookies</b>\n\n"
+                "<code>/cookie</code> — list profiles\n<code>/cookie &lt;name&gt;</code> — switch active profile\n"
+                "Reply to a Netscape-format <code>cookies.txt</code> with <code>/cookie &lt;name&gt;</code> to add one.\n\n"
                 "Needed for private Instagram accounts, stories/highlights, age-gated videos."),
-    "admin": ("🔧 **Admin**\n\n"
-              "`/stats` — disk + active jobs\n`/clean` — purge stale temp files\n"
-              "`/cancel <id>` / 🛑 button — stop a job\n`/cancelall` — stop everything\n"
-              "`/updateyt` — update yt-dlp now (also runs on startup + every 6h "
+    "admin": ("🔧 <b>Admin</b>\n\n"
+              "<code>/stats</code> — disk + active jobs\n<code>/clean</code> — purge stale temp files\n"
+              "<code>/cancel &lt;id&gt;</code> / 🛑 button — stop a job\n<code>/cancelall</code> — stop everything\n"
+              "<code>/updateyt</code> — update yt-dlp now (also runs on startup + every 6h "
               "automatically; restarts the bot to load it, but only when idle)\n"
-              "`/sh <cmd>` — run a shell command on the host (admin only)\n"
-              "`/allow <id>` / `/ban <id>` — access control"),
+              "<code>/sh</code> — live persistent shell on the host (admin only): send commands one after "
+              "another in a real PTY with arrow keys, history, tab completion and Ctrl+C — see /help → Admin\n"
+              "<code>/allow &lt;id&gt;</code> / <code>/ban &lt;id&gt;</code> — access control"),
 }
 
 
@@ -141,25 +143,27 @@ def cmd_cookie(client, message):
         client.download_media(doc_msg, file_name=path)
         state.set_pref(message.chat.id, "active_cookie", name)
         logger.info(f"chat {message.chat.id} saved cookie profile '{name}'")
-        return message.reply_text(f"🍪 Saved cookie profile `{name}` and made it active.")
+        return message.reply_text(f"🍪 Saved cookie profile <code>{esc(name)}</code> and made it active.")
     if len(parts) > 1:
         name = parts[1].strip()
         if os.path.exists(state.cookie_path(name)):
             state.set_pref(message.chat.id, "active_cookie", name)
-            return message.reply_text(f"🍪 Switched to cookie profile `{name}`.")
-        return message.reply_text(f"No cookie profile named `{name}`. Reply to a cookies.txt file with `/cookie {name}` to create it.")
+            return message.reply_text(f"🍪 Switched to cookie profile <code>{esc(name)}</code>.")
+        return message.reply_text(
+            f"No cookie profile named <code>{esc(name)}</code>. Reply to a cookies.txt file with "
+            f"<code>/cookie {esc(name)}</code> to create it.")
     if not state.list_cookie_profiles():
         return message.reply_text(
             "🍪 No cookie profiles yet.\n\n"
-            "Send (or reply to) a Netscape-format `cookies.txt` with `/cookie <name>` to add one — "
-            "needed for private Instagram accounts, stories/highlights, and age-gated videos."
+            "Send (or reply to) a Netscape-format <code>cookies.txt</code> with <code>/cookie &lt;name&gt;</code> "
+            "to add one — needed for private Instagram accounts, stories/highlights, and age-gated videos."
         )
     message.reply_text(_cookie_list_text(message.chat.id), reply_markup=_cookie_list_kb(message.chat.id))
 
 
 def _cookie_list_text(chat_id):
     active = state.get_prefs(chat_id).get("active_cookie", "global")
-    return f"🍪 **Cookie profiles** — active: `{active}`\n\nTap a name to switch, ⚙️ to rename/delete."
+    return f"🍪 <b>Cookie profiles</b> — active: <code>{esc(active)}</code>\n\nTap a name to switch, ⚙️ to rename/delete."
 
 def _cookie_list_kb(chat_id):
     active = state.get_prefs(chat_id).get("active_cookie", "global")
@@ -198,7 +202,7 @@ def cb_cookie_manage(client, cq):
          InlineKeyboardButton("🗑 Delete", callback_data=f"ckdel:{name}")],
         [InlineKeyboardButton("⬅️ Back", callback_data="ckback")],
     ])
-    safe_edit(cq, f"🍪 Managing profile `{name}`", reply_markup=kb)
+    safe_edit(cq, f"🍪 Managing profile <code>{esc(name)}</code>", reply_markup=kb)
     cq.answer()
 
 
@@ -210,7 +214,7 @@ def cb_cookie_delete_confirm(client, cq):
         InlineKeyboardButton("✅ Yes, delete", callback_data=f"ckdelok:{name}"),
         InlineKeyboardButton("❌ Cancel", callback_data=f"ckmgr:{name}"),
     ]])
-    safe_edit(cq, f"🗑 Delete cookie profile `{name}`? This can't be undone.", reply_markup=kb)
+    safe_edit(cq, f"🗑 Delete cookie profile <code>{esc(name)}</code>? This can't be undone.", reply_markup=kb)
     cq.answer()
 
 
@@ -221,7 +225,7 @@ def cb_cookie_delete(client, cq):
     ok = state.delete_cookie_profile(cq.message.chat.id, name)
     cq.answer("🗑 Deleted." if ok else "❌ Not found.", show_alert=not ok)
     if not state.list_cookie_profiles():
-        return safe_edit(cq, "🍪 No cookie profiles left. Send a `cookies.txt` with `/cookie <name>` to add one.")
+        return safe_edit(cq, "🍪 No cookie profiles left. Send a <code>cookies.txt</code> with <code>/cookie &lt;name&gt;</code> to add one.")
     safe_edit(cq, _cookie_list_text(cq.message.chat.id), reply_markup=_cookie_list_kb(cq.message.chat.id))
 
 
@@ -230,7 +234,7 @@ def cb_cookie_delete(client, cq):
 def cb_cookie_rename_prompt(client, cq):
     name = cq.data.split(":", 1)[1]
     state.set_awaiting_input(cq.message.chat.id, "cookie_rename", name)
-    safe_edit(cq, f"✏️ Reply with the new name for cookie profile `{name}` (or wait 2 minutes to cancel).")
+    safe_edit(cq, f"✏️ Reply with the new name for cookie profile <code>{esc(name)}</code> (or wait 2 minutes to cancel).")
     cq.answer()
 
 
@@ -242,9 +246,9 @@ def handle_cookie_rename(client, message, old_name):
         return message.reply_text("⚠️ Empty name, rename cancelled.")
     ok, err = state.rename_cookie_profile(message.chat.id, old_name, new_name)
     if ok:
-        message.reply_text(f"✅ Renamed `{old_name}` → `{new_name}`.")
+        message.reply_text(f"✅ Renamed <code>{esc(old_name)}</code> → <code>{esc(new_name)}</code>.")
     else:
-        message.reply_text(f"❌ {err}")
+        message.reply_text(f"❌ {esc(err)}")
 
 
 # ── /settings — per-chat toggles ─────────────────────────────────────────
@@ -267,21 +271,21 @@ def _settings_text(chat_id):
     clean_on = state.get_autoclean(chat_id)
     doc_on = state.get_as_document(chat_id)
     clean_line = (
-        "🧹 **Auto-clean**: on — a finished job deletes your link/command "
+        "🧹 <b>Auto-clean</b>: on — a finished job deletes your link/command "
         "message and my status message, leaving only the delivered file "
         "(or the Drive link, if nothing went to Telegram)."
         if clean_on else
-        "🧹 **Auto-clean**: off — command and status messages stay in the chat."
+        "🧹 <b>Auto-clean</b>: off — command and status messages stay in the chat."
     )
     doc_line = (
-        "📄 **As document**: on — everything uploads as a plain file "
+        "📄 <b>As document</b>: on — everything uploads as a plain file "
         "instead of a video/audio/photo, skipping Telegram's re-encoding "
         "and thumbnail generation (keeps exact quality, no inline player)."
         if doc_on else
-        "📄 **As document**: off — videos/audio/photos upload as their "
+        "📄 <b>As document</b>: off — videos/audio/photos upload as their "
         "native type with previews and streaming."
     )
-    return f"⚙️ **Settings** _(this chat only)_\n\n{clean_line}\n\n{doc_line}"
+    return f"⚙️ <b>Settings</b> <i>(this chat only)</i>\n\n{clean_line}\n\n{doc_line}"
 
 @app.on_message(filters.command("settings") & Authorized)
 @guarded
@@ -316,11 +320,11 @@ def cmd_access(client, message):
         return message.reply_text("⚠️ `/allow` and `/ban` only work in a private chat with me.")
     parts = message.text.split()
     if len(parts) != 2:
-        return message.reply_text("Usage: `/allow <user_id>` or `/ban <user_id>`")
+        return message.reply_text("Usage: <code>/allow &lt;user_id&gt;</code> or <code>/ban &lt;user_id&gt;</code>")
     if parts[0] == "/allow":
-        state.allow_user(parts[1]); message.reply_text(f"✅ `{parts[1]}` authorized.")
+        state.allow_user(parts[1]); message.reply_text(f"✅ <code>{esc(parts[1])}</code> authorized.")
     else:
-        state.ban_user(parts[1]); message.reply_text(f"🚫 `{parts[1]}` banned.")
+        state.ban_user(parts[1]); message.reply_text(f"🚫 <code>{esc(parts[1])}</code> banned.")
 
 
 @app.on_callback_query(filters.regex(r"^cancel:"))
@@ -367,7 +371,8 @@ def cmd_mirror_leech(client, message):
                 return message.reply_text("⚠️ That reply doesn't contain a link or a file.")
 
     if not url:
-        return message.reply_text(f"⚠️ Usage: `/{cmd} <link>`, or reply to a link/file with `/{cmd}`.")
+        return message.reply_text(
+            f"⚠️ Usage: <code>/{esc(cmd)} &lt;link&gt;</code>, or reply to a link/file with <code>/{esc(cmd)}</code>.")
 
     # The yt-dlp-dedicated commands (WZML-X's naming: y/ytdl/yl/ytdlleech,
     # plus our own yt) show a quality picker instead of blindly grabbing
@@ -375,6 +380,14 @@ def cmd_mirror_leech(client, message):
     # "Requested format not available" errors since the options offered
     # come from formats that actually exist for this specific video.
     if cmd in YT_DEDICATED_CMDS:
+        return show_quality_picker(client, message, url, dest, zip_output)
+
+    # Every other /m /l /zm /zl link also gets a picker when it looks like
+    # a media page (YouTube etc.) — WZML-X's mirror command does exactly
+    # this. Non-media links (direct files, magnets, galleries) skip the
+    # picker and go straight to the right downloader.
+    host = _host_of(url)
+    if any(host == h or host.endswith("." + h) for h in config.YTDLP_AUTO_HOSTS):
         return show_quality_picker(client, message, url, dest, zip_output)
 
     dispatch_link(client, message, url, dest, zip_output=zip_output)
@@ -404,7 +417,7 @@ def show_quality_picker(client, message, url, dest, zip_output):
 
     client.edit_message_text(
         message.chat.id, status.id,
-        f"🎬 **{title[:80]}**\n\nPick a quality:",
+        f"🎬 <b>{esc(title[:80])}</b>\n\nPick a quality:",
         reply_markup=InlineKeyboardMarkup(rows),
     )
 
@@ -420,7 +433,7 @@ def cb_quality_pick(client, cq):
     safe_edit(cq, "⚡ Queued…")
     task_id = new_task_id()
     tag = f" 📦→{config.DEST_LABEL[session['dest']]}" if session["zip_output"] else f" →{config.DEST_LABEL[session['dest']]}"
-    status = cq.message.reply_text(f"🔎 Queued{tag} — `{task_id}`", reply_markup=cancel_kb(task_id))
+    status = cq.message.reply_text(f"🔎 Queued{tag} — <code>{esc(task_id)}</code>", reply_markup=cancel_kb(task_id))
     task_dir = os.path.join(config.DOWNLOAD_DIR, task_id)
     state.register_job(task_id, cq.message.chat.id, status.id, "yt-dlp", task_dir)
     state.task_queue.put((run_leech_job,
@@ -445,7 +458,7 @@ def queue_telegram_media_job(client, message, media_msg, dest, zip_output=False)
         return message.reply_text("❌ Disk full, try again later.")
     task_id = new_task_id()
     tag = f"📦→{config.DEST_LABEL[dest]}" if zip_output else f"→{config.DEST_LABEL[dest]}"
-    status = message.reply_text(f"🔎 Queued {tag} — `{task_id}`", reply_markup=cancel_kb(task_id))
+    status = message.reply_text(f"🔎 Queued {tag} — <code>{esc(task_id)}</code>", reply_markup=cancel_kb(task_id))
     task_dir = os.path.join(config.DOWNLOAD_DIR, task_id)
     state.register_job(task_id, message.chat.id, status.id, "tg-media", task_dir)
     state.task_queue.put((run_telegram_media_job,
@@ -495,7 +508,7 @@ def run_telegram_media_job(client, chat_id, msg_id, media_msg, task_id, reply_to
         links = []
         file_kb = None
         if dest == "telegram":
-            throttled_edit(client, chat_id, msg_id, f"☁️ Uploading… (`{fmtsz(size)}`)", markup=cancel_kb(task_id), force=True)
+            throttled_edit(client, chat_id, msg_id, f"☁️ Uploading… (<code>{fmtsz(size)}</code>)", markup=cancel_kb(task_id), force=True)
             uploader.upload_to_telegram(client, chat_id, fpath, msg_id, reply_to=reply_to, task_id=task_id)
         else:
             throttled_edit(client, chat_id, msg_id, "☁️ Uploading to Drive…", markup=cancel_kb(task_id), force=True)
@@ -507,7 +520,7 @@ def run_telegram_media_job(client, chat_id, msg_id, media_msg, task_id, reply_to
                     InlineKeyboardButton("🗑 Delete", callback_data=f"qdel:{info['id']}"),
                 ]])
 
-        summary = f"✅ Done — `{fmtsz(size)}` → {config.DEST_LABEL[dest]}"
+        summary = f"✅ Done — <code>{fmtsz(size)}</code> → {config.DEST_LABEL[dest]}"
         if links:
             summary += "\n" + "\n".join(links)
         throttled_edit(client, chat_id, msg_id, summary, markup=file_kb, force=True)
@@ -517,7 +530,7 @@ def run_telegram_media_job(client, chat_id, msg_id, media_msg, task_id, reply_to
         throttled_edit(client, chat_id, msg_id, "🛑 Cancelled.", force=True)
     except Exception as e:
         logger.exception(f"[{task_id}] telegram-media job failed")
-        throttled_edit(client, chat_id, msg_id, f"❌ Failed: `{str(e)[:300]}`", force=True)
+        throttled_edit(client, chat_id, msg_id, f"❌ Failed: <code>{esc(str(e)[:300])}</code>", force=True)
     finally:
         state.drop_job(task_id)
         shutil.rmtree(task_dir, ignore_errors=True)
@@ -568,13 +581,13 @@ def queue_gdrive_job(client, message, file_id, dest, zip_output=False):
     if not drive.enabled():
         return message.reply_text(
             "☁️ That's a Google Drive link, but Drive isn't configured on this bot "
-            "(missing GCP credentials in `.env`) — I can't fetch it without API access."
+            "(missing GCP credentials in <code>.env</code>) — I can't fetch it without API access."
         )
     if not state.ensure_free(config.MIN_FREE_MB):
         return message.reply_text("❌ Disk full, try again later.")
     task_id = new_task_id()
     tag = f" 📦→{config.DEST_LABEL[dest]}" if zip_output else f" →{config.DEST_LABEL[dest]}"
-    status = message.reply_text(f"🔎 Queued{tag} — `{task_id}`", reply_markup=cancel_kb(task_id))
+    status = message.reply_text(f"🔎 Queued{tag} — <code>{esc(task_id)}</code>", reply_markup=cancel_kb(task_id))
     task_dir = os.path.join(config.DOWNLOAD_DIR, task_id)
     state.register_job(task_id, message.chat.id, status.id, "gdrive", task_dir)
     state.task_queue.put((run_gdrive_job,
@@ -614,7 +627,7 @@ def run_gdrive_job(client, chat_id, msg_id, file_id, task_id, reply_to, dest, zi
             with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
                 for fp in entries:
                     zf.write(fp, os.path.relpath(fp, task_dir))
-            throttled_edit(client, chat_id, msg_id, f"☁️ Uploading… (`{fmtsz(os.path.getsize(zpath))}`)", force=True)
+            throttled_edit(client, chat_id, msg_id, f"☁️ Uploading… (<code>{fmtsz(os.path.getsize(zpath))}</code>)", force=True)
             if dest == "telegram":
                 uploader.upload_to_telegram(client, chat_id, zpath, msg_id, reply_to=reply_to, task_id=task_id)
             else:
@@ -627,7 +640,7 @@ def run_gdrive_job(client, chat_id, msg_id, file_id, task_id, reply_to, dest, zi
             done_kb = None
             link = None
             if dest == "telegram":
-                throttled_edit(client, chat_id, msg_id, f"☁️ Uploading… (`{fmtsz(size)}`)", markup=cancel_kb(task_id), force=True)
+                throttled_edit(client, chat_id, msg_id, f"☁️ Uploading… (<code>{fmtsz(size)}</code>)", markup=cancel_kb(task_id), force=True)
                 uploader.upload_to_telegram(client, chat_id, fpath, msg_id, reply_to=reply_to, task_id=task_id)
             else:
                 throttled_edit(client, chat_id, msg_id, "☁️ Uploading to Drive…", markup=cancel_kb(task_id), force=True)
@@ -638,7 +651,7 @@ def run_gdrive_job(client, chat_id, msg_id, file_id, task_id, reply_to, dest, zi
                         InlineKeyboardButton("✏️ Rename", callback_data=f"qren:{info['id']}"),
                         InlineKeyboardButton("🗑 Delete", callback_data=f"qdel:{info['id']}"),
                     ]])
-            summary = f"✅ Done — `{fmtsz(size)}` → {config.DEST_LABEL[dest]}"
+            summary = f"✅ Done — <code>{fmtsz(size)}</code> → {config.DEST_LABEL[dest]}"
             if link:
                 summary += f"\n{link}"
             throttled_edit(client, chat_id, msg_id, summary, markup=done_kb, force=True)
@@ -659,7 +672,7 @@ def run_gdrive_job(client, chat_id, msg_id, file_id, task_id, reply_to, dest, zi
         throttled_edit(client, chat_id, msg_id, "🛑 Cancelled.", force=True)
     except Exception as e:
         logger.exception(f"[{task_id}] gdrive job failed")
-        throttled_edit(client, chat_id, msg_id, f"❌ Failed: `{str(e)[:300]}`", force=True)
+        throttled_edit(client, chat_id, msg_id, f"❌ Failed: <code>{esc(str(e)[:300])}</code>", force=True)
     finally:
         state.drop_job(task_id)
         shutil.rmtree(task_dir, ignore_errors=True)
@@ -706,7 +719,7 @@ def _download_gdrive_folder(client, chat_id, msg_id, task_id, folder_meta, task_
 def queue_leech_job(client, message, url, dest, zip_output=False, format_selector=None):
     task_id = new_task_id()
     tag = f" 📦→{config.DEST_LABEL[dest]}" if zip_output else f" →{config.DEST_LABEL[dest]}"
-    status = message.reply_text(f"🔎 Queued{tag} — `{task_id}`", reply_markup=cancel_kb(task_id))
+    status = message.reply_text(f"🔎 Queued{tag} — <code>{esc(task_id)}</code>", reply_markup=cancel_kb(task_id))
     task_dir = os.path.join(config.DOWNLOAD_DIR, task_id)
     state.register_job(task_id, message.chat.id, status.id, "yt-dlp", task_dir)
     state.task_queue.put((run_leech_job,
@@ -732,6 +745,7 @@ def run_leech_job(client, chat_id, msg_id, url, task_id, reply_to, dest, zip_out
 
         if use_direct:
             fpath = engine.download_direct(url, chat_id, msg_id, task_id, client, task_dir)
+            info = None
         else:
             fpath, info = engine.download(url, chat_id, msg_id, task_id, client, task_dir, format_selector=format_selector)
 
@@ -739,6 +753,10 @@ def run_leech_job(client, chat_id, msg_id, url, task_id, reply_to, dest, zip_out
             return throttled_edit(client, chat_id, msg_id, "🛑 Cancelled.", force=True)
 
         fpath = fix_unknown_ext(fpath)
+        # WZML-X-style metadata pass: yt-dlp's merge can drop the duration/
+        # resolution tags Telegram needs (a missing duration is why uploads
+        # showed up as "0 seconds" in the player). Re-tag from ffprobe.
+        fpath = engine.fix_media_metadata(fpath)
 
         if zip_output:
             throttled_edit(client, chat_id, msg_id, "📦 Zipping…", force=True)
@@ -754,19 +772,23 @@ def run_leech_job(client, chat_id, msg_id, url, task_id, reply_to, dest, zip_out
         file_kb = None
 
         if dest == "telegram":
-            throttled_edit(client, chat_id, msg_id, f"☁️ Uploading… (`{fmtsz(size)}`)", markup=cancel_kb(task_id), force=True)
-            uploader.upload_to_telegram(client, chat_id, fpath, msg_id, reply_to=reply_to, task_id=task_id)
+            throttled_edit(client, chat_id, msg_id, f"☁️ Uploading… (<code>{fmtsz(size)}</code>)", markup=cancel_kb(task_id), force=True)
+            uploader.upload_to_telegram(client, chat_id, fpath, msg_id, reply_to=reply_to, task_id=task_id,
+                                        video_meta=engine.probe_video_meta(fpath))
         elif dest == "drive":
             throttled_edit(client, chat_id, msg_id, "☁️ Uploading to Drive…", markup=cancel_kb(task_id), force=True)
-            info = drive.upload_file_full(fpath, task_id=task_id)
-            if info:
-                links.append(info["link"])
+            dinfo = drive.upload_file_full(fpath, task_id=task_id)
+            if dinfo:
+                links.append(dinfo["link"])
                 file_kb = InlineKeyboardMarkup([[
-                    InlineKeyboardButton("✏️ Rename", callback_data=f"qren:{info['id']}"),
-                    InlineKeyboardButton("🗑 Delete", callback_data=f"qdel:{info['id']}"),
+                    InlineKeyboardButton("✏️ Rename", callback_data=f"qren:{dinfo['id']}"),
+                    InlineKeyboardButton("🗑 Delete", callback_data=f"qdel:{dinfo['id']}"),
                 ]])
 
-        summary = f"✅ Done — `{fmtsz(size)}` → {config.DEST_LABEL[dest]}"
+        summary = f"✅ Done — <code>{fmtsz(size)}</code> → {config.DEST_LABEL[dest]}"
+        title = (info or {}).get("title") if isinstance(info, dict) else None
+        if title:
+            summary = f"🎬 <b>{esc(str(title)[:80])}</b>\n{summary}"
         if links:
             summary += "\n" + "\n".join(links)
         throttled_edit(client, chat_id, msg_id, summary, markup=file_kb, force=True)
@@ -775,10 +797,10 @@ def run_leech_job(client, chat_id, msg_id, url, task_id, reply_to, dest, zip_out
     except engine.CancelledError:
         throttled_edit(client, chat_id, msg_id, "🛑 Cancelled.", force=True)
     except engine.DownloadError as e:
-        throttled_edit(client, chat_id, msg_id, f"❌ Couldn't fetch that link:\n`{str(e)[:300]}`", force=True)
+        throttled_edit(client, chat_id, msg_id, f"❌ Couldn't fetch that link:\n<code>{esc(str(e)[:300])}</code>", force=True)
     except Exception as e:
         logger.exception(f"[{task_id}] leech job failed")
-        throttled_edit(client, chat_id, msg_id, f"❌ Failed: `{str(e)[:300]}`", force=True)
+        throttled_edit(client, chat_id, msg_id, f"❌ Failed: <code>{esc(str(e)[:300])}</code>", force=True)
     finally:
         state.drop_job(task_id)
         shutil.rmtree(task_dir, ignore_errors=True)
@@ -803,6 +825,13 @@ def auto_leech(client, message):
         if kind == "drive_newfolder":
             from .handlers_drive import handle_drive_new_folder
             return handle_drive_new_folder(client, message, target)
+
+    # Live shell owns plain text while a session is open (admin only) —
+    # this is what makes /sh a continuous terminal instead of one-shot runs.
+    from .handlers_shell import shell_feed_or_none
+    if shell_feed_or_none(client, message.chat.id,
+                          message.from_user.id if message.from_user else 0, text):
+        return
 
     magnet = config.MAGNET_RE.search(text)
     if magnet:

@@ -1,6 +1,7 @@
 import threading, time, os, sys
 
 from pyrogram import Client
+from pyrogram.enums import ParseMode
 
 from . import config, state, log
 
@@ -43,6 +44,13 @@ app = Client(
     api_hash=config.API_HASH,
     bot_token=config.BOT_TOKEN,
     workdir=config.DATA_DIR,
+    # Global HTML parse mode (the WZML-X approach). Markdown's delimiter
+    # auto-balancing produced entities that overrun the message length
+    # (Telegram error 400 ENTITY_BOUNDS_INVALID) whenever dynamic content —
+    # filenames, log tails, URLs with backticks/brackets — shifted a
+    # delimiter. HTML has no auto-balancing: what you escape is what gets
+    # parsed, so entity bounds always match the text.
+    parse_mode=ParseMode.HTML,
     # Default is 1 — meaning file parts upload/download serially over a
     # single connection. Raising this lets Pyrogram push multiple parts of
     # the same file in parallel, which is the single biggest lever for
@@ -92,8 +100,8 @@ def start():
     _lock_fh = _acquire_single_instance_lock()
     from . import engine
     engine.update_yt_dlp(restart_on_update=True)  # safe here — nothing is serving yet
-    from . import handlers_core, handlers_admin, handlers_subproc, handlers_instagram, handlers_drive, handlers_fallback  # noqa: F401
-    logger.info("handlers registered: core, admin, subproc, instagram, drive, fallback")
+    from . import handlers_core, handlers_admin, handlers_shell, handlers_subproc, handlers_instagram, handlers_drive, handlers_fallback  # noqa: F401
+    logger.info("handlers registered: core, admin+shell, subproc, instagram, drive, fallback")
     _start_workers()
     threading.Thread(target=_purge_loop, daemon=True).start()
     threading.Thread(target=_yt_dlp_update_loop, daemon=True).start()

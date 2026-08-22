@@ -5,7 +5,7 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from . import config, state, drive, uploader, log
 from .core import app
-from .utils import bar, throttled_edit, new_task_id, zip_dir, fmtsz, autoclean_if_enabled, guarded
+from .utils import bar, throttled_edit, new_task_id, zip_dir, fmtsz, autoclean_if_enabled, guarded, esc
 from .dispatcher import LiveDispatcher
 from .handlers_core import Authorized, cancel_kb, _host_of
 
@@ -49,7 +49,7 @@ def cmd_subprocess(client, message):
     cmd = message.command[0]
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2 or not parts[1].strip():
-        return message.reply_text(f"⚠️ Usage: `/{cmd} <url>`")
+        return message.reply_text(f"⚠️ Usage: <code>/{esc(cmd)} &lt;url&gt;</code>")
     url = parts[1].strip()
 
     if cmd == "gallery":
@@ -69,10 +69,14 @@ def queue_subprocess_job(client, message, cmd, url, dest="telegram", zip_output=
     task_id = new_task_id()
     task_dir = os.path.join(config.DOWNLOAD_DIR, task_id)
     tag = f"📦→{config.DEST_LABEL[dest]}" if zip_output else f"→{config.DEST_LABEL[dest]}"
-    status = message.reply_text(f"⚡ Queued `/{cmd}` {tag} — `{task_id}`", reply_markup=cancel_kb(task_id))
+    status = message.reply_text(
+        f"⚡ Queued <code>/{esc(cmd)}</code> {tag} — <code>{esc(task_id)}</code>",
+        reply_markup=cancel_kb(task_id),
+        disable_web_page_preview=True,
+    )
     state.register_job(task_id, message.chat.id, status.id, cmd, task_dir)
     state.task_queue.put((run_subprocess_job,
-                           (client, message.chat.id, status.id, cmd, url, task_id, message.id, dest, zip_output)))
+                           (client, message.chat.id, status.id, cmd, esc(url), task_id, message.id, dest, zip_output)))
 
 
 def run_subprocess_job(client, chat_id, msg_id, cmd, url, task_id, reply_to, dest="telegram", zip_output=False):
@@ -87,10 +91,11 @@ def run_subprocess_job(client, chat_id, msg_id, cmd, url, task_id, reply_to, des
         args = _build_args(cmd, url, task_dir, cookie_file)
         if not shutil.which(args[0]):
             return throttled_edit(client, chat_id, msg_id,
-                                   f"❌ `{args[0]}` isn't installed on this host.", force=True)
+                                   f"❌ <code>{esc(args[0])}</code> isn't installed on this host.", force=True)
 
         logger.info(f"[{task_id}] /{cmd} starting — {url} (dest={dest}, zip={zip_output})")
-        throttled_edit(client, chat_id, msg_id, f"⬇️ `/{cmd}`…\n`{url[:60]}`", markup=cancel_kb(task_id), force=True)
+        throttled_edit(client, chat_id, msg_id, f"⬇️ <code>/{esc(cmd)}</code>…\n<code>{esc(url[:60])}</code>",
+                       markup=cancel_kb(task_id), force=True)
         proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                  universal_newlines=True, bufsize=1)
         state.attach_proc(task_id, proc)
@@ -134,13 +139,13 @@ def run_subprocess_job(client, chat_id, msg_id, cmd, url, task_id, reply_to, des
                 eta_m = ETA_RE.search(line)
                 eta = eta_m.group(1) if eta_m else "?"
                 throttled_edit(client, chat_id, msg_id,
-                                f"⬇️ Torrent\n{bar(float(pct), 100)}\n`{done}/{total}` • {spd}/s • ETA {eta}",
+                                f"⬇️ Torrent\n{bar(float(pct), 100)}\n<code>{esc(done)}/{esc(total)}</code> • {esc(spd)}/s • ETA {esc(eta)}",
                                 markup=cancel_kb(task_id))
             elif cmd == "gallery" and any(k in line for k in ("Downloading", "Skip", "error")):
-                throttled_edit(client, chat_id, msg_id, f"🖼️ gallery-dl\n`{line.strip()[:120]}`",
+                throttled_edit(client, chat_id, msg_id, f"🖼️ gallery-dl\n<code>{esc(line.strip()[:120])}</code>",
                                 markup=cancel_kb(task_id))
             elif cmd == "clone":
-                throttled_edit(client, chat_id, msg_id, f"🌐 Mirroring…\n`{line.strip()[:120]}`",
+                throttled_edit(client, chat_id, msg_id, f"🌐 Mirroring…\n<code>{esc(line.strip()[:120])}</code>",
                                 markup=cancel_kb(task_id))
 
         proc.wait()
@@ -170,7 +175,8 @@ def run_subprocess_job(client, chat_id, msg_id, cmd, url, task_id, reply_to, des
                 err = _parse_aria2_error(full_log)
                 return throttled_edit(
                     client, chat_id, msg_id,
-                    f"❌ Nothing downloaded.\n" + (f"`{err}`\n" if err else "") + f"```\n{log_tail[-1500:]}\n```",
+                    "❌ Nothing downloaded.\n" + (f"<code>{esc(err)}</code>\n" if err else "") +
+                    f"<pre>{esc(log_tail[-1500:])}</pre>",
                     force=True,
                 )
             throttled_edit(client, chat_id, msg_id, "📦 Zipping…", force=True)
@@ -208,7 +214,8 @@ def run_subprocess_job(client, chat_id, msg_id, cmd, url, task_id, reply_to, des
             log_tail = "\n".join(full_log[-15:])
             return throttled_edit(
                 client, chat_id, msg_id,
-                f"❌ Nothing downloaded.\n" + (f"`{err}`\n" if err else "") + f"```\n{log_tail[-1500:]}\n```",
+                "❌ Nothing downloaded.\n" + (f"<code>{esc(err)}</code>\n" if err else "") +
+                f"<pre>{esc(log_tail[-1500:])}</pre>",
                 force=True,
             )
 
@@ -220,7 +227,7 @@ def run_subprocess_job(client, chat_id, msg_id, cmd, url, task_id, reply_to, des
 
     except Exception as e:
         logger.exception(f"[{task_id}] /{cmd} job failed")
-        throttled_edit(client, chat_id, msg_id, f"❌ `{str(e)[:300]}`", force=True)
+        throttled_edit(client, chat_id, msg_id, f"❌ <code>{esc(str(e)[:300])}</code>", force=True)
     finally:
         state.drop_job(task_id)
         shutil.rmtree(task_dir, ignore_errors=True)

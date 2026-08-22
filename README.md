@@ -85,9 +85,17 @@ as the original bot's `/m`/`/l` dispatch.
 - `/cancelall` — admin: stop every running job.
 - `/stats` — disk usage / active jobs.
 - `/clean` — admin: purge stale temp files immediately.
-- `/sh <command>` — admin: run a shell command on the host the bot runs
-  on. This is a real, unrestricted remote-shell feature — it's exactly as
-  powerful as SSH access to the box, gated only by Telegram user ID. Only
+- `/sh` — admin: **live persistent shell terminal**. Opens one real bash
+  session in a PTY that stays alive between messages — `cd`, exports and
+  environment persist across commands, and because it's a genuine PTY you
+  get bash's full interactive line editing: ↑/↓ history recall, ←/→ cursor
+  movement, TAB completion. Any non-command text you send goes to the
+  shell; output streams into a single message that keeps updating. On-screen
+  ⛔ Ctrl+C button (plus `/shc`) interrupts long-running commands without
+  killing the session; `/shexit` (or the ⏹ button) ends it; idle sessions
+  auto-close after 30 minutes. `/sh <command>` still works as a one-shot
+  runner for quick things. As with any remote shell this is exactly as
+  powerful as SSH access to the box, gated only by Telegram user ID — only
   set `ADMIN_ID` to an account you trust, and don't expose the bot token
   or `.env` to anyone else.
 - `/allow <id>` / `/ban <id>` — admin: access control, if `ADMIN_ID` is set.
@@ -148,6 +156,20 @@ A few things adopted from [WZML-X](https://github.com/SilentDemonSD/WZML-X)
 (a much larger fork of `mirror-leech-telegram-bot`) that fit cleanly into
 this bot's architecture:
 
+- **HTML parse mode everywhere** — WZML-X's approach. Markdown's delimiter
+  auto-balancing was producing entity tables that overrun the message text
+  (Telegram error `ENTITY_BOUNDS_INVALID`, "❌ Something went wrong") when
+  filenames/log lines/URLs contained backticks or brackets. HTML entities
+  have deterministic bounds, so the whole error class is gone.
+- **Quality picker with sizes on every media link** — `/m`, `/l` and the
+  `/yt`-family all probe the video first and offer real resolutions with
+  approximate file sizes (`🎬 1080p (486 MB)`), like WZML-X's yt-dlp flow.
+  Picking from formats that actually exist also sidesteps "Requested format
+  not available" errors.
+- **Media metadata pass before upload** — downloads are remuxed
+  (`ffmpeg -c copy`, no recoding) and duration/dimensions are read back
+  via ffprobe and passed to Telegram. This fixes videos showing as
+  "0 seconds" in the player after a DASH merge drops the header tags.
 - Command aliases matching its names: `/y`/`/ytdl` (mirror via yt-dlp),
   `/yl`/`/ytdlleech` (leech via yt-dlp) — on top of this bot's own `/m`/`/l`,
   which already auto-detect yt-dlp links so these need no separate code path.

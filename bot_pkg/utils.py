@@ -1,4 +1,4 @@
-import math, time, threading, os, zipfile, uuid
+import math, time, threading, os, zipfile, uuid, html as _html
 
 from pyrogram.errors import FloodWait, MessageNotModified
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -6,6 +6,15 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from . import log
 
 logger = log.get(__name__)
+
+def esc(s):
+    """HTML-escape dynamic content (& < >) before embedding it in any
+    message/caption. The bot runs with parse_mode=HTML globally (the WZML
+    approach): unlike markdown, HTML entities have deterministic bounds —
+    arbitrary filenames/URLs/log lines can never corrupt the entity table
+    (the source of Telegram's ENTITY_BOUNDS_INVALID crashes). Only & <>
+    need escaping; markdown metacharacters are literal in HTML mode."""
+    return _html.escape(str(s), quote=False)
 
 def cancel_kb(task_id):
     return InlineKeyboardMarkup([[InlineKeyboardButton("🛑 Stop", callback_data=f"cancel:{task_id}")]])
@@ -176,7 +185,9 @@ def throttled_edit(client, chat_id, msg_id, text, markup=None, force=False):
         except MessageNotModified:
             pass
         except Exception as e:
-            print(f"[edit] {e}")
+            # Don't let a failed cosmetic edit vanish silently — ENTITY_BOUNDS /
+            # entity-parse errors used to surface here as bare "[edit] ..." prints.
+            logger.warning(f"edit_message_text failed for ({chat_id}, {msg_id}): {type(e).__name__}: {e}")
 
     with _lock:
         now = time.time()
