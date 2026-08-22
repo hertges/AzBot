@@ -15,10 +15,15 @@ POST_RE = re.compile(r"instagram\.com/(p|reel|tv)/")
 PROFILE_RE = re.compile(r"instagram\.com/([A-Za-z0-9._]+)/?(?:\?|$)")
 
 ARCHIVE_URLS = {
-    "posts": "https://www.instagram.com/{u}/",
+    # Explicit sub-extractor URLs — verified against gallery-dl 1.32 source:
+    # the bare profile URL dispatches ONLY "posts" by default (Dispatch's
+    # include list), and the old `-o instagram.highlights=true` options no
+    # longer exist. Pointing each type at its own sub-extractor endpoint is
+    # the only reliable way to get the right content.
+    "posts": "https://www.instagram.com/{u}/posts/",
     "reels": "https://www.instagram.com/{u}/reels/",
     "stories": "https://www.instagram.com/stories/{u}/",
-    "highlights": "https://www.instagram.com/{u}/",  # gallery-dl pulls highlights via --highlights flag
+    "highlights": "https://www.instagram.com/{u}/highlights/",
     "tagged": "https://www.instagram.com/{u}/tagged/",
 }
 ARCHIVE_LABEL = {
@@ -232,29 +237,45 @@ def run_ig_archive_job(client, chat_id, msg_id, archive_type, username, task_id,
     task_dir = os.path.join(config.DOWNLOAD_DIR, task_id)
     os.makedirs(task_dir, exist_ok=True)
     cookie_file = state.active_cookie_file(chat_id)
-    disp = LiveDispatcher(client, chat_id, msg_id, task_dir, dest, task_id=task_id)
-
-    # Index ledger lives LOCALLY per (chat, user, type): data/indexes/<chat>/…
-    # gallery-dl's --download-archive dedup keeps re-runs incremental, and
-    # /igindex can wipe any of them independently. Nothing touches Drive.
-    archive_db = state.index_path(chat_id, username, archive_type)
-
-    url = ARCHIVE_URLS[archive_type].format(u=username)
-    args = ["gallery-dl", "--dest", task_dir, "--download-archive", archive_db]
-    if archive_type == "highlights":
-        args += ["-o", "instagram.highlights=true", "-o", "instagram.stories=false"]
-    if cookie_file:
-        args += ["--cookies", cookie_file]
-    elif archive_type in ("stories", "highlights"):
-        return throttled_edit(client, chat_id, msg_id,
-                               "❌ Stories/Highlights need a cookie profile — set one with <code>/cookie</code>.",
-                               force=True)
-    args.append(url)
-
+    disp = None
     full_log = []
     try:
+        # Validate BEFORE creating the dispatcher — otherwise an early return
+        # below would leak the dispatcher's watcher thread and leave a ghost
+        # entry in ACTIVE_JOBS forever.
+        if archive_type in ("stories", "highlights") and not cookie_file:
+            state.drop_job(task_id)
+            shutil.rmtree(task_dir, ignore_errors=True)
+            return throttled_edit(client, chat_id, msg_id,
+                                   "❌ Stories/Highlights need a cookie profile — set one with <code>/cookie</code>.",
+                                   force=True)
         if not shutil.which("gallery-dl"):
-            return throttled_edit(client, chat_id, msg_id, "❌ <code>gallery-dl</code> isn't installed on this host.", force=True)
+            state.drop_job(task_id)
+            shutil.rmtree(task_dir, ignore_errors=True)
+            return throttled_edit(client, chat_id, msg_id,
+                                   "❌ <code>gallery-dl</code> isn't installed on this host.", force=True)
+
+        # Index ledger lives LOCALLY per (chat, user, type): data/indexes/<chat>/…
+        # gallery-dl's --download-archive dedup keeps re-runs incremental, and
+        # /igindex can wipe any of them independently.
+        archive_db = state.index_path(chat_id, username, archive_type)
+        # Fresh deploy with an empty data/: restore the ledger from the Drive
+        # datastore BEFORE handing it to gallery-dl — otherwise it would start
+        # blank and re-download (duplicate) everything already archived.
+        if not os.path.exists(archive_db):
+            try:
+                from . import datastore
+                datastore.pull_index(chat_id, username, archive_type, archive_db)
+            except Exception as e:
+                logger.warning(f"[{task_id}] index restore from Drive skipped: {e}")
+
+        url = ARCHIVE_URLS[archive_type].format(u=username)
+        args = ["gallery-dl", "--dest", task_dir, "--download-archive", archive_db]
+        if cookie_file:
+            args += ["--cookies", cookie_file]
+        args.append(url)
+
+        disp = LiveDispatcher(client, chat_id, msg_id, task_dir, dest, task_id=task_id)
 
         logger.info(f"[{task_id}] /ig {archive_type} for @{username} starting (dest={dest})")
         proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
