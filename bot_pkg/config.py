@@ -1,0 +1,124 @@
+from dotenv import load_dotenv
+load_dotenv()
+
+import os
+
+# ── Telegram / Pyrogram credentials ─────────────────────────────────────
+# API_ID / API_HASH come from https://my.telegram.org (needed by Pyrogram
+# even when running as a bot — this is what lets us talk MTProto directly
+# instead of the 50MB-limited HTTP Bot API).
+API_ID   = int(os.environ.get("API_ID", "0") or 0)
+API_HASH = os.environ.get("API_HASH", "").strip()
+BOT_TOKEN = os.environ.get("BOT_TOKEN", os.environ.get("TELEGRAM_TOKEN", "")).strip()
+
+ADMIN_ID  = os.environ.get("ADMIN_ID", "").strip()
+
+# ── Google Drive (optional secondary destination) ──────────────────────
+DRIVE_FOLDER_ID   = os.environ.get("DRIVE_FOLDER_ID", "").strip()
+GCP_CLIENT_ID     = os.environ.get("GCP_CLIENT_ID", "").strip()
+GCP_CLIENT_SECRET = os.environ.get("GCP_CLIENT_SECRET", "").strip()
+GCP_REFRESH_TOKEN = os.environ.get("GCP_REFRESH_TOKEN", "").strip()
+
+if not (API_ID and API_HASH and BOT_TOKEN):
+    print("CRITICAL: API_ID / API_HASH / BOT_TOKEN missing! See .env.example")
+    exit(1)
+
+_BASE_DIR    = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DOWNLOAD_DIR = os.path.join(_BASE_DIR, "downloads")
+DATA_DIR     = os.path.join(_BASE_DIR, "data")
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+os.makedirs(DATA_DIR, exist_ok=True)
+
+SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
+USERS_FILE    = os.path.join(DATA_DIR, "users.json")
+COOKIES_DIR   = os.path.join(DATA_DIR, "cookies")
+os.makedirs(COOKIES_DIR, exist_ok=True)
+
+MIN_FREE_MB = 300
+
+# Telegram's hard per-file cap for bot uploads over MTProto (what Pyrogram
+# uses). This is the real ceiling regardless of client library — there is
+# no "native" way past it without switching to a user account.
+TG_MAX_FILE_BYTES = 2 * 1000 * 1000 * 1000  # ~2GB
+
+UPLOAD_WORKERS = 3
+QUEUE_WORKERS  = 4
+
+# ── Link classification ─────────────────────────────────────────────────
+# Anything on this list, pasted with no command, gets auto-leeched.
+# yt-dlp itself supports ~1800 sites; these are just the hosts we treat as
+# "obviously a media link" for auto-detection so we don't try to leech
+# every bare URL someone pastes in chat.
+YTDLP_AUTO_HOSTS = (
+    "youtube.com", "youtu.be", "music.youtube.com",
+    "instagram.com",
+    "tiktok.com",
+    "twitter.com", "x.com",
+    "facebook.com", "fb.watch",
+    "reddit.com", "redd.it",
+    "vimeo.com", "dailymotion.com", "twitch.tv", "clips.twitch.tv",
+    "soundcloud.com", "bilibili.com", "nicovideo.jp",
+    "streamable.com", "rumble.com", "odysee.com",
+    "pinterest.com", "pin.it",
+    "threads.net",
+    "snapchat.com",
+)
+
+DIRECT_FILE_EXT = (
+    ".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v",
+    ".mp3", ".flac", ".m4a", ".wav", ".ogg", ".opus",
+    ".jpg", ".jpeg", ".png", ".gif", ".webp",
+    ".zip", ".rar", ".7z",
+)
+
+URL_RE = __import__("re").compile(r"https?://\S+")
+MAGNET_RE = __import__("re").compile(r"magnet:\?xt=urn:btih:[A-Za-z0-9]+\S*")
+
+DEST_LABEL = {"telegram": "📱 Telegram", "drive": "☁️ Drive"}
+
+IG_HOSTS = ("instagram.com",)
+
+# General art/photo platforms gallery-dl is pointed at generically — see
+# BLOCKED_GALLERY_HOSTS below for what's deliberately excluded.
+GALLERY_HOSTS = (
+    "imgur.com", "deviantart.com", "artstation.com", "flickr.com",
+    "pixiv.net", "tumblr.com", "500px.com", "pinterest.com",
+)
+
+# gallery-dl ships extractors for these out of the box. We don't build
+# curated auto-detection for them and actively refuse them in /gallery:
+# they're dedicated adult-content boards, and in the case of the
+# coomer/kemono/bunkr/cyberdrop family, they specifically exist to
+# redistribute paywalled creator content (OnlyFans/Patreon) without
+# consent. Everything else gallery-dl supports (art/photo platforms,
+# forums, image hosts, etc.) works normally through /gallery.
+BLOCKED_GALLERY_HOSTS = ()
+
+SHELL_TIMEOUT_S = 60
+
+# If a subprocess job (torrent/gallery/clone) produces no output at all for
+# this long, treat it as stalled and stop it rather than hang forever —
+# e.g. a torrent with zero peers, or a site blocking gallery-dl silently.
+STALL_TIMEOUT_S = 240
+
+# Optional raw yt-dlp option overrides, as a JSON object, e.g. in .env:
+#   YT_DLP_OPTIONS={"writesubtitles": true, "subtitleslangs": ["en"]}
+# Same idea as WZML-X's YT_DLP_OPTIONS — lets an admin tweak/extend yt-dlp
+# behavior without touching code. Merged on top of the bot's own defaults,
+# so it can override anything (format selection included) if needed.
+import json as _json
+_YT_DLP_OPTIONS_RAW = os.environ.get("YT_DLP_OPTIONS", "").strip()
+try:
+    YT_DLP_OPTIONS = _json.loads(_YT_DLP_OPTIONS_RAW) if _YT_DLP_OPTIONS_RAW else {}
+    if not isinstance(YT_DLP_OPTIONS, dict):
+        raise ValueError("YT_DLP_OPTIONS must be a JSON object")
+except (ValueError, _json.JSONDecodeError) as e:
+    print(f"WARNING: couldn't parse YT_DLP_OPTIONS ({e}) — ignoring it")
+    YT_DLP_OPTIONS = {}
+
+# ── Logging ──────────────────────────────────────────────────────────────
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+LOG_DIR = os.path.join(DATA_DIR, "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+LOG_FILE = os.path.join(LOG_DIR, "bot.log")
+
