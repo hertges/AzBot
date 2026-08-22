@@ -32,6 +32,13 @@ _lock = threading.Lock()
 def save_settings():
     with _lock:
         _save_json(config.SETTINGS_FILE, _settings)
+    # Mirror to Drive (AzBotData/settings.json) — best-effort, never blocks.
+    try:
+        from . import datastore
+        import threading as _th
+        _th.Thread(target=datastore.push_settings, daemon=True).start()
+    except Exception:
+        pass
 
 def save_users():
     with _lock:
@@ -108,7 +115,17 @@ def index_path(chat_id, username, archive_type):
     return os.path.join(d, f"{safe_u}.{archive_type}.txt")
 
 def ig_index_exists(chat_id, username, archive_type):
-    return os.path.exists(index_path(chat_id, username, archive_type))
+    p = index_path(chat_id, username, archive_type)
+    if os.path.exists(p):
+        return True
+    # Not local — try restoring from the Drive datastore (AzBotData/indexes/…)
+    try:
+        from . import datastore
+        if datastore.pull_index(chat_id, username, archive_type, p):
+            return True
+    except Exception:
+        pass
+    return False
 
 def list_ig_indexes(chat_id):
     """[(username, type), ...] found for this chat."""
@@ -122,26 +139,35 @@ def list_ig_indexes(chat_id):
     return out
 
 def delete_ig_index(chat_id, username=None, archive_type=None):
-    """Deletes matching ledgers. All args None → wipe every index for the
-    chat. Returns count deleted."""
+    """Deletes matching ledgers (local + Drive mirror). All args None → wipe
+    every index for the chat. Returns count deleted."""
     d = os.path.join(config.INDEX_DIR, str(chat_id))
-    if not os.path.isdir(d):
-        return 0
-    n = 0
-    for f in os.listdir(d):
-        m = re.match(r"^(.+)\.(posts|reels|stories|highlights|tagged)\.txt$", f)
-        if not m:
-            continue
-        u, t = m.group(1), m.group(2)
-        if username and re.sub(r"[^A-Za-z0-9._-]", "_", username) != u:
-            continue
-        if archive_type and t != archive_type:
-            continue
-        try:
-            os.remove(os.path.join(d, f)); n += 1
-        except OSError:
-            pass
-    return n
+    removed = []
+    if os.path.isdir(d):
+        for f in os.listdir(d):
+            m = re.match(r"^(.+)\.(posts|reels|stories|highlights|tagged)\.txt$", f)
+            if not m:
+                continue
+            u, t = m.group(1), m.group(2)
+            if username and re.sub(r"[^A-Za-z0-9._-]", "_", username) != u:
+                continue
+            if archive_type and t != archive_type:
+                continue
+            try:
+                os.remove(os.path.join(d, f))
+                removed.append(f)
+            except OSError:
+                pass
+    # Mirror the deletion into the Drive datastore too.
+    try:
+        from . import datastore
+        for f in removed:
+            datastore.delete_remote_index(chat_id, f)
+    except Exception:
+        pass
+    for f in removed:
+        logger.info(f"ig index deleted: {chat_id}/{f}")
+    return len(removed)
 
 def cookie_path(name="global"):
     safe = re.sub(r"[^\w\-]", "_", name)

@@ -13,7 +13,7 @@ KNOWN_COMMANDS = [
     "start", "help", "m", "l", "zm", "zl", "yt", "y", "ytdl", "ytdlleech", "yl",
     "ig", "igindex", "igindexes",
     "torrent", "gallery", "clone",
-    "zip", "zipd", "unzip",
+    "zipl", "zipm", "unzipl", "unzipm",
     "cookie", "settings", "drive", "drivesearch",
     "stats", "clean", "cancel", "cancelall", "ca", "sh", "shell", "shc", "shexit", "shq",
     "allow", "ban", "updateyt", "ytupdate",

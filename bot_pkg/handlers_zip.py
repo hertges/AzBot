@@ -1,14 +1,13 @@
-"""Zip / unzip as standalone commands.
+"""Zip leech/mirror as standalone commands.
 
-/zip  — reply to a file or a message with files, or pass links: everything
-        is downloaded, zipped into ONE archive and delivered (Telegram or
-        Drive via the standard command pair: /zip → TG, /zm-style /zipd
-        → Drive).
-/unzip — reply to a .zip/.rar/.7z archive (or pass a link to one): it is
-        extracted and every inner file is sent to this chat.
+/zipl  — reply to a file or a message with files, or pass links: everything
+         is downloaded, zipped into ONE archive and leeched to this chat.
+/zipm  — same, but the archive is mirrored to Drive (#folder works).
+/unzipl / unzipm — reply to a .zip/.rar/.7z archive (or pass a link to
+         one): it is extracted and every inner file is sent to this chat.
 
 Both support the shared payload grammar:
-    /zip url1 url2 | myname #folder
+    /zipl url1 url2 | myname #folder
 """
 import os, re, shutil, subprocess, threading, time, zipfile
 
@@ -56,10 +55,12 @@ def _extract(src, dest_dir):
     raise RuntimeError("No extractor available (install p7zip-full)")
 
 
-@app.on_message(filters.command("unzip") & Authorized)
+@app.on_message(filters.command(["unzipl", "unzipm"]) & Authorized)
 @guarded
 def cmd_unzip(client, message):
-    """Reply to an archive in chat OR pass link(s) to archives."""
+    """Unpack archives: /unzipl → inner files to Telegram.
+    /unzipm → accepted as an alias; inner files still go to this chat
+    (mirroring an unpacked archive back to Drive would just duplicate it)."""
     from .utils import URL_RE
     links, rename, folder = parse_payload(message.text.split(maxsplit=1)[1]
                                           if len(message.text.split(maxsplit=1)) > 1 else "")
@@ -70,7 +71,7 @@ def cmd_unzip(client, message):
             return _queue_unzip_local(client, message, reply)
         return message.reply_text(
             "⚠️ Reply to an archive file (<code>.zip .rar .7z .tar…</code>) "
-            "or pass link(s): <code>/unzip &lt;link&gt;</code>")
+            "or pass link(s): <code>/unzipl &lt;link&gt;</code>")
 
     # Archive(s) by link → download then extract. Reuse the leech pipeline
     # per link; extraction happens in run_leech_job? No — do it here.
@@ -171,12 +172,13 @@ def run_unzip_url_job(client, chat_id, msg_id, url, task_id, reply_to):
 
 # ── /zip — gather files (reply media, multiple replies, or links) → one zip ──
 
-@app.on_message(filters.command(["zip", "zipd"]) & Authorized)
+@app.on_message(filters.command(["zipl", "zipm"]) & Authorized)
 @guarded
 def cmd_zip(client, message):
-    dest = "drive" if message.command[0] == "zipd" else "telegram"
+    """Zip-leech (/zipl → Telegram) / zip-mirror (/zipm → Drive)."""
+    dest = "drive" if message.command[0] == "zipm" else "telegram"
     if dest == "drive" and not drive.enabled():
-        return message.reply_text("☁️ Drive isn't configured — use /zip to get the archive here.")
+        return message.reply_text("☁️ Drive isn't configured — use <code>/zipl</code> to get the archive here.")
 
     raw = message.text.split(maxsplit=1)[1] if len(message.text.split(maxsplit=1)) > 1 else ""
     links, rename, folder = parse_payload(raw)
@@ -202,7 +204,7 @@ def cmd_zip(client, message):
     task_id = new_task_id()
     tag = "→☁️ Drive" if dest == "drive" else "→📱 Telegram"
     label = f"<code>{esc(rename)}</code>" if rename else f"— <code>{esc(task_id)}</code>"
-    status = message.reply_text(f"📦 Queued <code>/zip</code> {tag} {label}",
+    status = message.reply_text(f"📦 Queued <code>/{esc(message.command[0])}</code> {tag} {label}",
                                 reply_markup=cancel_kb(task_id))
     task_dir = os.path.join(config.DOWNLOAD_DIR, task_id)
     state.register_job(task_id, message.chat.id, status.id, "zip", task_dir)

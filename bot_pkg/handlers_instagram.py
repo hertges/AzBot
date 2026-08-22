@@ -329,6 +329,12 @@ def run_ig_archive_job(client, chat_id, msg_id, archive_type, username, task_id,
         if errors:
             summary += f"\n⚠️ {len(errors)} failed."
         throttled_edit(client, chat_id, msg_id, summary, force=True)
+        # Mirror the (updated) index ledger into the Drive datastore.
+        try:
+            from . import datastore
+            datastore.push_index(chat_id, username, archive_type)
+        except Exception as e:
+            logger.warning(f"index Drive-mirror failed: {e}")
         autoclean_if_enabled(client, chat_id, msg_id, None, dest)
 
     except Exception as e:

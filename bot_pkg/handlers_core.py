@@ -97,7 +97,7 @@ HELP = {
            "<code>/yl</code>/<code>/ytdlleech</code> — WZML-X-style aliases (quality picker)\n\n"
            "<code>/torrent &lt;magnet or .torrent url&gt;</code> — force aria2c\n"
            "<code>/gallery &lt;url&gt;</code> / <code>/clone &lt;url&gt;</code> — gallery-dl / wget mirror\n"
-           "<code>/zip</code> · <code>/zipd</code> · <code>/unzip</code> — see the 🗃 Zip section\n\n"
+           "<code>/zipl</code> · <code>/zipm</code> · <code>/unzipl</code> — see the 🗃 Zip section\n\n"
            "<code>/drive</code> — browse Drive: get links, send files here, rename/delete, new folders • <code>/drivesearch &lt;q&gt;</code>\n\n"
            "Magnet links are auto-detected in plain messages too. Reply to any file or link instead of typing a URL."),
     "ig": ("📷 <b>Instagram</b>\n\n"
@@ -110,14 +110,14 @@ HELP = {
            "(delete Stories only, wipe one user, or clear everything). Deleting an index makes "
            "the next run re-fetch everything.\n\n"
            "Stories &amp; Highlights need a logged-in cookie profile (<code>/cookie</code>)."),
-    "zip": ("🗃 <b>Zip / Unzip</b>\n\n"
-            "<code>/zip</code> — gather files into ONE archive, sent to this chat:\n"
+    "zip": ("🗃 <b>Zip leech / mirror</b>\n\n"
+            "<code>/zipl</code> — gather files into ONE archive, sent to this chat:\n"
             "• reply to a file → zip it\n"
-            "• reply to several messages? use <code>/zip link1 link2 …</code> instead\n"
-            "<code>/zip &lt;link…&gt; | myname.zip #folder</code> — batch links + custom name\n"
-            "<code>/zipd</code> — same but uploads the archive to Drive (#folder works)\n\n"
-            "<code>/unzip</code> — reply to an archive (<code>.zip .rar .7z .tar…</code>) or pass its link: "
-            "every inner file is sent to this chat."),
+            "• pass direct links: <code>/zipl link1 link2 | myname.zip</code>\n"
+            "<code>/zipm</code> — same but the archive goes to Drive (<code>#folder</code> works)\n\n"
+            "<code>/unzipl</code> — reply to an archive (<code>.zip .rar .7z .tar…</code>) or pass its "
+            "link: every inner file is sent to this chat. <code>/unzipm</code> is an alias.\n\n"
+            "All support batch links + <code>| name</code>."),
     "cookies": ("🍪 <b>Cookies</b>\n\n"
                 "<code>/cookie</code> — list profiles\n<code>/cookie &lt;name&gt;</code> — switch active profile\n"
                 "Reply to a Netscape-format <code>cookies.txt</code> with <code>/cookie &lt;name&gt;</code> to add one.\n\n"

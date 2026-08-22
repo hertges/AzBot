@@ -64,14 +64,27 @@ delete selectively: one type of one user (just Stories), everything of one
 user, or wipe all. Deleting an index makes the next archive re-fetch from
 scratch.
 
-## Zip / unzip
+## Zip leech / mirror
 
-- `/zip` — reply to a file (or pass direct links) → one zip sent here.
+- `/zipl` — reply to a file (or pass direct links) → one zip leeched here.
   Supports batch links + `| name.zip`.
-- `/zipd` — same, but the archive goes to the selected Drive account
+- `/zipm` — same, but the archive goes to the selected Drive account
   (`#folder` works).
-- `/unzip` — reply to an archive (`.zip .rar .7z .tar …`) or pass its
-  link; every inner file is sent to this chat.
+- `/unzipl` — reply to an archive (`.zip .rar .7z .tar …`) or pass its
+  link; every inner file is sent to this chat. `/unzipm` is an alias.
+
+## Settings & indexes live in Drive
+
+`settings.json` and every Instagram index are mirrored into a single
+**AzBotData** folder on the bot's first Drive account:
+
+    AzBotData/
+      settings.json
+      indexes/<chat>/<user>.<type>.txt
+
+Local copies remain the working set; changes push up automatically,
+fresh deploys pull down on boot, and deleting an index in `/igindex`
+deletes it in both places. Rename the folder with `DATA_DRIVE_FOLDER=…`.
 
 ## Commands
 
