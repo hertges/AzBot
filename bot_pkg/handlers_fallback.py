@@ -10,7 +10,7 @@ logger = log.get(__name__)
 
 KNOWN_COMMANDS = [
     "start", "help", "m", "l", "zm", "zl", "yt", "y", "ytdl", "ytdlleech", "yl",
-    "ig", "igindex", "igindexes",
+    "ig", "igm", "igl", "igindex", "igindexes",
     "torrent", "gallery", "clone",
     "zipl", "zipm", "unzipl", "unzipm",
     "cookie", "settings", "drive", "drivesearch", "drivelist", "driveaccounts",
@@ -18,7 +18,8 @@ KNOWN_COMMANDS = [
     "allow", "ban", "updateyt", "ytupdate",
 ]
 ADMIN_COMMANDS = ["allow", "ban", "cancelall", "ca", "updateyt", "ytupdate",
-                  "shc", "shexit", "shq", "drivelogin", "addaccount"]
+                  "shc", "shexit", "shq", "drivelogin", "addaccount",
+                  "tokenup", "tokenpaste"]
 
 # These only ever run *after* every real command handler above has had its
 # shot (Pyrogram tries handlers in registration order within a group and

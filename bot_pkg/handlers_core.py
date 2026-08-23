@@ -104,11 +104,12 @@ HELP = {
            "<code>&lt;post/reel url&gt;</code> — just paste it, leeched like any other link\n"
            "<code>/ig &lt;profile_url&gt;</code> — multi-select picker: Posts/Reels/Stories/"
            "Highlights/Tagged, then ▶️ Start (Stories on by default). Leeches to Telegram.\n"
-           "<code>/m &lt;profile_url&gt;</code> — same picker, mirrored to Drive\n\n"
-           "<b>Indexes</b> (what's already fetched) are stored locally per chat/user/type — never in Drive.\n"
-           "<code>/igindex</code> — view + delete indexes per user or per type "
-           "(delete Stories only, wipe one user, or clear everything). Deleting an index makes "
-           "the next run re-fetch everything.\n\n"
+           "<code>/igm &lt;profile&gt;</code> — same, but archives go to Drive sorted into "
+           "<code>Instagram/&lt;user&gt;/&lt;type&gt;/</code> folders\n"
+           "<code>/igl &lt;profile&gt;</code> — same as /ig (explicit leech)\n\n"
+           "<b>Indexes</b> (what's already fetched) are stored per user/type — mirrored to Drive.\n"
+           "<code>/igindex</code> — view + delete indexes per user or per type. "
+           "Deleting an index makes the next run re-fetch everything.\n\n"
            "Stories &amp; Highlights need a logged-in cookie profile (<code>/cookie</code>)."),
     "zip": ("🗃 <b>Zip leech / mirror</b>\n\n"
             "<code>/zipl</code> — gather files into ONE archive, sent to this chat:\n"
@@ -154,7 +155,9 @@ def cmd_cookie(client, message):
         state.set_pref(message.chat.id, "active_cookie", name)
         state.mirror_cookie(name)   # persist to Drive datastore
         logger.info(f"chat {message.chat.id} saved cookie profile '{name}'")
-        return message.reply_text(f"🍪 Saved cookie profile <code>{esc(name)}</code> and made it active.")
+        return message.reply_text(
+            f"🍪 Saved cookie profile <code>{esc(name)}</code> and made it active.\n"
+            f"☁️ Mirrored to Drive: <code>AzBotData/cookies/{esc(os.path.basename(path))}</code>")
     if len(parts) > 1:
         name = parts[1].strip()
         if os.path.exists(state.cookie_path(name)):
@@ -452,16 +455,20 @@ def cb_cancel(client, cq):
 # while "yt" leeches, which is worth remembering since they look similar.
 
 YT_DEDICATED_CMDS = ("yt", "y", "ytdl", "ytdlleech", "yl")
+IG_DEDICATED_CMDS = ("igm", "igl")
 
 @app.on_message(filters.command(["m", "l", "zm", "zl", "yt", "y", "ytdl", "ytdlleech",
-                                 "yl", "torrent"]) & Authorized)
+                                 "yl", "torrent", "igm", "igl"]) & Authorized)
 @guarded
 def cmd_mirror_leech(client, message):
     """Universal mirror/leech entry. Payload grammar (all commands):
         /m <link> [<link2> …]          batch — one job per link
         /m <link> | myname             rename — saved as `myname`, extension untouched
         /m <link> #folder              Drive: upload into folder `folder` (auto-created)
-    Reply mode still works: reply to a file/link with no args."""
+    Reply mode still works: reply to a file/link with no args.
+
+    /igm <profile> — Instagram archive → Drive (per-type subfolders)
+    /igl <profile> — Instagram archive → Telegram"""
     from .utils import parse_payload
     cmd = message.command[0]
     dest = "drive" if cmd in ("m", "zm", "y", "ytdl") else "telegram"
@@ -477,6 +484,20 @@ def cmd_mirror_leech(client, message):
         raw = message.reply_to_message.text or message.reply_to_message.caption
 
     links, rename, folder = parse_payload(raw)
+
+    # Instagram archive commands (/igm /igl): route to the IG picker with
+    # the right destination — never through the yt-dlp quality picker.
+    if cmd in IG_DEDICATED_CMDS:
+        if not links:
+            return message.reply_text(
+                f"⚠️ Usage: <code>/{esc(cmd)} &lt;profile_or_post_url&gt;</code> [links…]")
+        from .handlers_instagram import dispatch_instagram
+        dest_ig = "drive" if cmd == "igm" else "telegram"
+        if dest_ig == "drive" and not drive.enabled():
+            return message.reply_text("☁️ Drive isn't configured — use <code>/igl</code> for Telegram delivery.")
+        for u in links:
+            dispatch_instagram(client, message, u, dest_ig)
+        return
 
     if not links:
         reply = message.reply_to_message
@@ -499,9 +520,16 @@ def _dispatch_one(client, message, cmd, url, dest, zip_output, rename=None, fold
                                      dest="telegram" if dest != "drive" or not drive.enabled() else "telegram",
                                      zip_output=zip_output)
 
+    # Instagram NEVER goes through yt-dlp's quality picker (WZML-X parity:
+    # gallery-dl owns Instagram — photos, carousels and videos alike; the
+    # yt-dlp extractor just errors with "No video formats found!").
+    host = _host_of(url)
+    if any(host == h or host.endswith("." + h) for h in config.IG_HOSTS):
+        from .handlers_instagram import dispatch_instagram
+        return dispatch_instagram(client, message, url, dest)
+
     # Media-page links get the WZML-X-style quality picker (real resolutions
     # + sizes). Direct files/magnets skip it.
-    host = _host_of(url)
     is_media_page = any(host == h or host.endswith("." + h) for h in config.YTDLP_AUTO_HOSTS)
     if is_media_page:
         return show_quality_picker(client, message, url, dest, zip_output,
@@ -908,6 +936,10 @@ def run_leech_job(client, chat_id, msg_id, url, task_id, reply_to, dest, zip_out
 
         host = _host_of(url)
         known_site = any(host == h or host.endswith("." + h) for h in config.YTDLP_AUTO_HOSTS)
+        # Instagram is gallery-dl territory, never yt-dlp (WZML-X parity).
+        if any(host == h or host.endswith("." + h) for h in config.IG_HOSTS):
+            from .handlers_subproc import queue_subprocess_job
+            return queue_subprocess_job(client, message, "gallery", url, dest, zip_output)
         use_direct = engine.is_direct_file_link(url)
         if not use_direct and not known_site:
             probed = engine.probe_is_direct_file(url)
@@ -1016,6 +1048,9 @@ def auto_leech(client, message):
         if kind == "drive_acct_name":
             from .handlers_driveauth import start_device_login
             return start_device_login(client, message, (message.text or "").strip())
+        if isinstance(kind, tuple) and kind[0] == "drive_token":
+            from .handlers_driveauth import _handle_token_input
+            return _handle_token_input(client, message, kind[1])
         if isinstance(kind, tuple) and kind[0] == "drive_rename":
             from .handlers_drive import handle_drive_rename
             return handle_drive_rename(client, message, kind[1], target)

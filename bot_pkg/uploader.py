@@ -12,7 +12,21 @@ CancelledError = state.CancelledError
 
 VIDEO_EXT = {".mp4", ".mkv", ".mov", ".webm", ".m4v"}
 AUDIO_EXT = {".mp3", ".flac", ".m4a", ".wav", ".ogg", ".opus"}
-PHOTO_EXT = {".jpg", ".jpeg", ".png", ".webp"}
+PHOTO_EXT = {".jpg", ".jpeg", ".png"}
+# .webp is deliberately NOT in PHOTO_EXT: Telegram turns small webp uploads
+# into STICKERS. Send webp as an animation if it's animated, otherwise as a
+# plain document — either way it stays a real file, not a sticker.
+STICKERISH_EXT = {".webp", ".tgs"}
+
+def _is_animated_webp(fpath):
+    """WEBP with an ANIM chunk = animated (send as animation); otherwise
+    static. Reads just the first 64 bytes."""
+    try:
+        with open(fpath, "rb") as f:
+            head = f.read(64)
+        return b"ANIM" in head
+    except OSError:
+        return False
 
 def _progress_cb(client, chat_id, msg_id, label, task_id=None):
     samples = []
@@ -73,6 +87,13 @@ def _send_one(client, chat_id, fpath, msg_id, caption=None, reply_to=None, task_
                 r = client.send_audio(audio=fpath, duration=duration, performer="AzLeechBot", **kwargs)
             elif ext in PHOTO_EXT:
                 r = client.send_photo(photo=fpath, **kwargs)
+            elif ext == ".webp":
+                # Animated webp → animation (loops inline); static webp →
+                # document. Never photo: Telegram would make it a sticker.
+                if _is_animated_webp(fpath):
+                    r = client.send_animation(animation=fpath, **kwargs)
+                else:
+                    r = client.send_document(document=fpath, **kwargs)
             else:
                 r = client.send_document(document=fpath, **kwargs)
             logger.info(f"uploaded to Telegram: {fpath} ({fmtsz(os.path.getsize(fpath))}) -> chat {chat_id}")

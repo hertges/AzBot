@@ -179,11 +179,29 @@ def _item_view(f, item_id):
         InlineKeyboardButton("✏️ Rename", callback_data=f"drvren:{item_id}"),
         InlineKeyboardButton("🗑 Delete", callback_data=f"drvdel:{item_id}"),
     ])
-    rows.append([InlineKeyboardButton("🔗 Open in Drive", url=f.get("webViewLink", "https://drive.google.com")),
-                 InlineKeyboardButton("⬅️ Back", callback_data="drvback")])
+    if is_folder:
+        # browse straight into this folder from the detail card
+        rows.append([InlineKeyboardButton("📂 Open folder", callback_data=f"drvgointo:{item_id}"),
+                     InlineKeyboardButton("⬅️ Back", callback_data="drvback")])
+    else:
+        rows.append([InlineKeyboardButton("🔗 Open in Drive", url=f.get("webViewLink", "https://drive.google.com")),
+                     InlineKeyboardButton("⬅️ Back", callback_data="drvback")])
     text = (f"{icon} <b>{name}</b>\n📦 {size}"
             + ("\n📁 folder" if is_folder else ""))
     return text, InlineKeyboardMarkup(rows)
+
+
+@app.on_callback_query(filters.regex(r"^drvgointo:"))
+@guarded
+def cb_drive_gointo(client, cq):
+    """From the folder detail card, jump into that folder in the browser."""
+    folder_id = cq.data.split(":", 1)[1]
+    chat_id = cq.message.chat.id
+    files = _get_listing(chat_id, state.get_drive_nav(chat_id)[-1][0])
+    name = next((f["name"] for f in files if f["id"] == folder_id), folder_id)
+    state.push_drive_nav(chat_id, folder_id, name)
+    _show(chat_id, cq.message.id, 0, cq=cq)
+    cq.answer()
 
 
 @app.on_callback_query(filters.regex(r"^drvopen:"))

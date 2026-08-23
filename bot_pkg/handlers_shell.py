@@ -31,9 +31,9 @@ logger = log.get(__name__)
 SHELL_COMMAND_NAMES = ("sh", "shell")
 
 # ── tunables ──────────────────────────────────────────────────────────────
-OUTPUT_TICK_S = 1.2       # how often the live-output message refreshes
-SNAPSHOT_CHARS = 3000     # max chars of terminal tail shown per edit
-BUFFER_CHARS = 16000      # rolling terminal buffer kept in RAM
+OUTPUT_TICK_S = 0.9        # how often the live-output message refreshes
+SNAPSHOT_CHARS = 3000      # max chars of terminal tail shown per edit
+BUFFER_CHARS = 16000       # rolling terminal buffer kept in RAM
 IDLE_TIMEOUT_S = 1800     # auto-close after 30 idle minutes
 READ_CHUNK = 4096
 
@@ -156,9 +156,14 @@ class ShellSession:
     def _keyboard(self):
         return InlineKeyboardMarkup([[
             InlineKeyboardButton("▲", callback_data="shup"),
-            InlineKeyboardButton("⛔ Ctrl+C", callback_data="shctrlc"),
+            InlineKeyboardButton("Tab", callback_data="shtab"),
             InlineKeyboardButton("▼", callback_data="shdown"),
         ], [
+            InlineKeyboardButton("⌫ Backspace", callback_data="shbs"),
+            InlineKeyboardButton("⛔ Ctrl+C", callback_data="shctrlc"),
+            InlineKeyboardButton("⏎ Enter", callback_data="shenter"),
+        ], [
+            InlineKeyboardButton("Ctrl+D (EOF)", callback_data="shcd"),
             InlineKeyboardButton("⏹ Exit shell", callback_data="shexit"),
         ]])
 
@@ -241,6 +246,19 @@ class ShellSession:
             os.write(self.master, b"\x1b[A" if direction == "up" else b"\x1b[B")
             return True
         except OSError:
+            return False
+
+    def send_key(self, key):
+        """Extra terminal keys for the button row: Tab (completion),
+        Backspace, Enter, Ctrl+D (EOF/logout)."""
+        if self.exited or self.closed:
+            return False
+        self.last_activity = time.time()
+        codes = {"tab": b"\t", "bs": b"\x7f", "enter": b"\n", "cd": b"\x04"}
+        try:
+            os.write(self.master, codes[key])
+            return True
+        except (OSError, KeyError):
             return False
 
     def cursor(self, direction):
@@ -393,6 +411,60 @@ def register_shell_handlers(app, AdminOnly, guarded, on_one_shot):
             return cq.answer("No live shell.", show_alert=True)
         sess.history_nav("down")
         cq.answer("▼ next command")
+
+    @app.on_callback_query(filters.regex(r"^shtab$"))
+    @guarded
+    def sh_tab_cb(client, cq):
+        if not _is_admin_user(cq.from_user.id):
+            return cq.answer("Admin only.", show_alert=True)
+        with _sess_lock:
+            sess = SESSIONS.get(cq.message.chat.id)
+        if not sess:
+            return cq.answer("No live shell.", show_alert=True)
+        sess.send_key("tab")
+        cq.answer("Tab — completion")
+
+    @app.on_callback_query(filters.regex(r"^shbs$"))
+    @guarded
+    def sh_bs_cb(client, cq):
+        if not _is_admin_user(cq.from_user.id):
+            return cq.answer("Admin only.", show_alert=True)
+        with _sess_lock:
+            sess = SESSIONS.get(cq.message.chat.id)
+        if not sess:
+            return cq.answer("No live shell.", show_alert=True)
+        sess.send_key("bs")
+        cq.answer("⌫")
+
+    @app.on_callback_query(filters.regex(r"^shenter$"))
+    @guarded
+    def sh_enter_cb(client, cq):
+        if not _is_admin_user(cq.from_user.id):
+            return cq.answer("Admin only.", show_alert=True)
+        with _sess_lock:
+            sess = SESSIONS.get(cq.message.chat.id)
+        if not sess:
+            return cq.answer("No live shell.", show_alert=True)
+        sess.send_key("enter")
+        cq.answer("⏎")
+
+    @app.on_callback_query(filters.regex(r"^shcd$"))
+    @guarded
+    def sh_cd_cb(client, cq):
+        """Ctrl+D on an empty line ends the shell (like typing exit)."""
+        if not _is_admin_user(cq.from_user.id):
+            return cq.answer("Admin only.", show_alert=True)
+        with _sess_lock:
+            sess = SESSIONS.pop(cq.message.chat.id, None)
+        if not sess:
+            return cq.answer("No live shell.", show_alert=True)
+        try:
+            sess.send_key("cd")
+        except Exception:
+            pass
+        time.sleep(0.5)
+        sess.stop()
+        cq.answer("Ctrl+D — shell closed")
 
     @app.on_callback_query(filters.regex(r"^shexit$"))
     @guarded

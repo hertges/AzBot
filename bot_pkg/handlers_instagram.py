@@ -254,6 +254,11 @@ def run_ig_archive_job(client, chat_id, msg_id, archive_type, username, task_id,
             return throttled_edit(client, chat_id, msg_id,
                                    "❌ <code>gallery-dl</code> isn't installed on this host.", force=True)
 
+        # Drive delivery: sort by type inside Instagram/<username>/<type>/
+        drive_folder = None
+        if dest == "drive" and drive.enabled():
+            drive_folder = f"Instagram/{username}/{archive_type}"
+
         # Index ledger lives LOCALLY per (chat, user, type): data/indexes/<chat>/…
         # gallery-dl's --download-archive dedup keeps re-runs incremental, and
         # /igindex can wipe any of them independently.
@@ -274,7 +279,8 @@ def run_ig_archive_job(client, chat_id, msg_id, archive_type, username, task_id,
             args += ["--cookies", cookie_file]
         args.append(url)
 
-        disp = LiveDispatcher(client, chat_id, msg_id, task_dir, dest, task_id=task_id)
+        disp = LiveDispatcher(client, chat_id, msg_id, task_dir, dest, task_id=task_id,
+                               folder=drive_folder)
 
         logger.info(f"[{task_id}] /ig {archive_type} for @{username} starting (dest={dest})")
         proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,

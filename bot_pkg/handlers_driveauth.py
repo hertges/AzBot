@@ -133,8 +133,18 @@ def start_device_login(client, message, name):
     except Exception as e:
         return safe_edit(client, message.chat.id, status.id, f"❌ {esc(e)}")
     if "device_code" not in d:
+        err = str(d.get("error", d))
+        hint = ""
+        if "invalid_client" in err or "Limited Input" in err or "TVs" in err:
+            hint = (
+                "\n\n<b>Why:</b> your Google OAuth client isn't a <b>'TVs and Limited Input "
+                "devices'</b> type, which is the only kind that works with sign-in codes.\n\n"
+                "<b>Easiest fix instead:</b> on your PC run the bot's helper once:\n"
+                "<code>python gen_token.py work</code>\n"
+                "it signs in via your browser and saves <code>token_work.pickle</code> — then just "
+                "send that file here as a reply to <code>/tokenup work</code>.")
         return safe_edit(client, message.chat.id, status.id,
-                          f"❌ Google said: <code>{esc(str(d)[:200])}</code>")
+                          f"❌ Google said: <code>{esc(err[:300])}</code>{hint}")
 
     _pending[message.chat.id] = {
         "name": name, "device_code": d["device_code"],
@@ -210,6 +220,54 @@ def _poll_approval(chat_id=None):
         _pending.pop(chat_id, None)
         return
     app.send_message(chat_id, "⏱️ Device code expired — run /drivelogin again.")
+
+
+@app.on_message(filters.command(["tokenup", "tokenpaste"]) & AdminOnly)
+@guarded
+def cmd_tokenup(client, message):
+    """Register a Drive account from a refresh token produced on a PC
+    (gen_token.py) — for clients that can't use the device sign-in flow."""
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        return message.reply_text(
+            "☁️ <code>/tokenup &lt;name&gt;</code> — then paste the refresh token "
+            "in your next message (from <code>gen_token.py</code> on your PC), or reply "
+            "to a .txt/.pickle file containing it.")
+    name = re.sub(r"[^a-z0-9_-]", "", parts[1].strip().lower())
+    if not name:
+        return message.reply_text("⚠️ Invalid name.")
+    state.set_awaiting_input(message.chat.id, ("drive_token", name), None)
+    message.reply_text(f"🔑 Send the refresh token for <b>{esc(name)}</b> now (plain text, or as a file).")
+
+
+def _handle_token_input(client, message, name):
+    token = ""
+    if message.reply_to_message and message.reply_to_message.document:
+        path = client.download_media(message.reply_to_message,
+                                      file_name=os.path.join(config.DATA_DIR, f"tok_{name}"))
+        if path:
+            token = open(path, encoding="utf-8", errors="replace").read().strip()
+            os.remove(path)
+    else:
+        token = (message.text or "").strip()
+    # tolerate pasted JSON from gen_token-style tools
+    if token.startswith("{"):
+        try:
+            import json as _j
+            token = _j.loads(token).get("refresh_token", "")
+        except Exception:
+            pass
+    token = [l for l in token.splitlines() if l.strip() and not l.startswith("#")]
+    token = token[-1].strip() if token else ""
+    if not token or len(token) < 20:
+        return message.reply_text("❌ That doesn't look like a refresh token. Try again: /tokenup " + name)
+    try:
+        _register_account(name, token)
+    except Exception as e:
+        return message.reply_text(f"❌ {esc(e)}")
+    message.reply_text(
+        f"✅ Drive account <b>{esc(name)}</b> registered and saved (survives restarts). "
+        f"Switch chats to it in /settings → ☁️ Drive.")
 
 
 @app.on_message(filters.command(["drivelist", "driveaccounts"]) & AdminOnly)
