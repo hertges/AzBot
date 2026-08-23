@@ -66,8 +66,19 @@ def _ensure_path(rel_dir):
         return None
 
 
+_upload_lock = threading.Lock()
+
 def _upload(local_path, rel_path):
-    """PUT local file at rel_path ('settings.json', 'indexes/42/u.t.txt')."""
+    """PUT local file at rel_path ('settings.json', 'indexes/42/u.t.txt').
+    Serialized: concurrent resumable uploads from the LiveDispatcher pool
+    plus datastore mirrors were hitting googleapiclient's httplib2 stack
+    simultaneously — that native path is where the heap corruption
+    (free(): corrupted unsorted chunks) was observed."""
+    with _upload_lock:
+        return _upload_inner(local_path, rel_path)
+
+
+def _upload_inner(local_path, rel_path):
     try:
         from . import drive
         srv = drive.get_service(_account())

@@ -461,11 +461,11 @@ def cb_cancel(client, cq):
 # command names for the same thing, added to match it — note "y" mirrors
 # while "yt" leeches, which is worth remembering since they look similar.
 
-YT_DEDICATED_CMDS = ("yt", "y", "ytdl", "ytdlleech", "yl")
+YT_DEDICATED_CMDS = ("yt", "y", "ytdl", "ytdlleech", "yl", "ytm", "ytl")
 IG_DEDICATED_CMDS = ("igm", "igl")
 
 @app.on_message(filters.command(["m", "l", "zm", "zl", "yt", "y", "ytdl", "ytdlleech",
-                                 "yl", "torrent", "igm", "igl"]) & Authorized)
+                                 "yl", "ym", "ytm", "ytl", "torrent", "igm", "igl"]) & Authorized)
 @guarded
 def cmd_mirror_leech(client, message):
     """Universal mirror/leech entry. Payload grammar (all commands):
@@ -478,7 +478,7 @@ def cmd_mirror_leech(client, message):
     /igl <profile> — Instagram archive → Telegram"""
     from .utils import parse_payload
     cmd = message.command[0]
-    dest = "drive" if cmd in ("m", "zm", "y", "ytdl") else "telegram"
+    dest = "drive" if cmd in ("m", "zm", "y", "ytdl", "ym") else "telegram"
     zip_output = cmd in ("zm", "zl")
     if dest == "drive" and not drive.enabled():
         return message.reply_text("☁️ Drive isn't configured on this bot (missing GCP credentials in <code>.env</code>).")
@@ -683,7 +683,7 @@ def _launch_status_and_job(client, chat_id, reply_msg_id_unused, session,
                            selector, extra):
     task_id = new_task_id()
     tag = f" 📦→{config.DEST_LABEL[session['dest']]}" if session["zip_output"] else f" →{config.DEST_LABEL[session['dest']]}"
-    status = app.send_message(
+    status = client.send_message(
         chat_id,
         f"🔎 Queued{tag} — <code>{esc(task_id)}</code>",
         reply_markup=cancel_kb(task_id))

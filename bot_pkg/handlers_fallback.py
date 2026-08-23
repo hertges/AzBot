@@ -9,7 +9,7 @@ from .handlers_shell import SHELL_COMMAND_NAMES
 logger = log.get(__name__)
 
 KNOWN_COMMANDS = [
-    "start", "help", "m", "l", "zm", "zl", "yt", "y", "ytdl", "ytdlleech", "yl",
+    "start", "help", "m", "l", "zm", "zl", "yt", "y", "ytdl", "ytdlleech", "yl", "ym", "ytl",
     "ig", "igm", "igl", "igindex", "igindexes", "setthumb", "removethumb",
     "torrent", "gallery", "clone",
     "zipl", "zipm", "unzipl", "unzipm",

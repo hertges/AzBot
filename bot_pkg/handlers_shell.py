@@ -39,9 +39,19 @@ READ_CHUNK = 4096
 
 _ANSI_RE = re.compile(
     r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\x1b[BDEHMc789=>]|\x07")
+# readline's backspace echo: pair + the character it erases
+_BS_ERASE_RE = re.compile(r"(.)\x08 \x08", re.S)
 
 def _clean(text):
     text = text.replace("\r\n", "\n").replace("\r", "")
+    # Model readline's backspace echo properly: each "\x08 \x08" pair erases
+    # the PRECEDING character on a real terminal, so the pair plus that char
+    # must all be removed (shell-bot parity for the ⌫ button).
+    while True:
+        m = _BS_ERASE_RE.search(text)
+        if not m:
+            break
+        text = text[:m.start()] + text[m.end():]
     return _ANSI_RE.sub("", text)
 
 
@@ -434,6 +444,11 @@ def register_shell_handlers(app, AdminOnly, guarded, on_one_shot):
         if not sess:
             return cq.answer("No live shell.", show_alert=True)
         sess.send_key("bs")
+        # Backspace over a pty is echoed by readline as "\b \b" — give the
+        # reader a beat to absorb it, then force the canvas repaint so the
+        # shortened line is visible immediately.
+        time.sleep(0.25)
+        sess._repaint(sess._keyboard(), force=True)
         cq.answer("⌫")
 
     @app.on_callback_query(filters.regex(r"^shenter$"))

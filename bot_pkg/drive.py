@@ -44,20 +44,28 @@ def _root_id(chat_id):
     return config.DRIVE_FOLDER_ID or "root"
 
 def _resolve_folder(srv, name, parent_id, create=True):
-    """Finds (or creates) folder `name` inside parent_id. One level — #folder
-    tags are simple names. Returns folder id."""
-    safe = name.replace("'", "\\'")
-    q = (f"name = '{safe}' and mimeType = 'application/vnd.google-apps.folder' "
-         f"and '{parent_id}' in parents and trashed = false")
-    res = srv.files().list(q=q, fields="files(id)", pageSize=1).execute()
-    files = res.get("files", [])
-    if files:
-        return files[0]["id"]
-    if not create:
-        return None
-    meta = {"name": name, "mimeType": "application/vnd.google-apps.folder",
-            "parents": [parent_id]}
-    return srv.files().create(body=meta, fields="id").execute()["id"]
+    """Finds (or creates) folder `name` inside parent_id. `name` may contain
+    slashes ("Instagram/user/posts") — each level is resolved/created in
+    order. Returns final folder id."""
+    node = parent_id
+    for level in name.split("/"):
+        level = level.strip()
+        if not level:
+            continue
+        safe = level.replace("'", "\\'")
+        q = (f"name = '{safe}' and mimeType = 'application/vnd.google-apps.folder' "
+             f"and '{node}' in parents and trashed = false")
+        res = srv.files().list(q=q, fields="files(id)", pageSize=1).execute()
+        files = res.get("files", [])
+        if files:
+            node = files[0]["id"]
+            continue
+        if not create:
+            return None
+        meta = {"name": level, "mimeType": "application/vnd.google-apps.folder",
+                "parents": [node]}
+        node = srv.files().create(body=meta, fields="id").execute()["id"]
+    return node
 
 def ensure_folder(name, chat_id=None, account=None):
     """Returns the id of Drive folder `name` for this chat's account,
@@ -132,6 +140,13 @@ def search_files(name_contains, page_size=20):
     safe = name_contains.replace("'", "\\'")
     return list_files(query_extra=f"name contains '{safe}'", page_size=page_size)
 
+# One Drive upload at a time, process-wide: googleapiclient's httplib2
+# transport is not reliably thread-safe under concurrent resumable uploads
+# (observed heap corruption "free(): corrupted unsorted chunks" on Sevalla
+# when an IG archive and a settings mirror uploaded simultaneously).
+_UPLOAD_SEMA = threading.Semaphore(1)
+
+
 def upload_file(fpath, progress_cb=None, task_id=None, rename=None, folder=None,
                 chat_id=None, account=None):
     """Uploads fpath; returns webViewLink or None (see upload_file_full)."""
@@ -139,8 +154,18 @@ def upload_file(fpath, progress_cb=None, task_id=None, rename=None, folder=None,
                             rename=rename, folder=folder, chat_id=chat_id, account=account)
     return info["link"] if info else None
 
+
 def upload_file_full(fpath, progress_cb=None, task_id=None, rename=None,
                      folder=None, chat_id=None, account=None, make_public=True):
+    """Serialized wrapper: one Drive upload at a time (see _UPLOAD_SEMA)."""
+    with _UPLOAD_SEMA:
+        return _upload_file_full_impl(fpath, progress_cb=progress_cb, task_id=task_id,
+                                       rename=rename, folder=folder, chat_id=chat_id,
+                                       account=account, make_public=make_public)
+
+
+def _upload_file_full_impl(fpath, progress_cb=None, task_id=None, rename=None,
+                           folder=None, chat_id=None, account=None, make_public=True):
     """Uploads fpath to the chat's chosen Drive account.
 
     rename  — final file NAME; extension is preserved from fpath unless the
