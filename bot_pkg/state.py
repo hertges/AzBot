@@ -215,13 +215,16 @@ def restore_cookies():
         logger.warning(f"cookie restore skipped: {e}")
     return n
 
-# ── Custom thumbnails (WZML-X /setthumb parity) ──────────────────────────
+# ── Custom thumbnails (opt-in; videos ALWAYS get an auto frame-grab) ─────
 def thumb_path(chat_id):
+    p = os.path.join(config.THUMBS_DIR, f"{chat_id}.jpg")
     os.makedirs(config.THUMBS_DIR, exist_ok=True)
-    return os.path.join(config.THUMBS_DIR, f"{chat_id}.jpg")
+    return p
 
 def get_thumb(chat_id):
-    p = thumb_path(chat_id)
+    """Only returns a user-set thumb if the FILE exists — never creates
+    anything, and THUMBS_DIR itself is only made by /setthumb."""
+    p = os.path.join(config.THUMBS_DIR, f"{chat_id}.jpg")
     return p if os.path.exists(p) else None
 
 def set_thumb(chat_id, src_image):
@@ -262,10 +265,13 @@ def delete_thumb(chat_id):
     return removed
 
 def restore_thumbs():
-    """Boot-time: pull every custom thumb missing locally."""
+    """Boot-time: pull user-set thumbs missing locally. Skips silently when
+    no thumbs folder exists remotely (no Drive chatter for unused feature)."""
     n = 0
     try:
         from . import datastore
+        if not datastore.remote_dir_exists("thumbs"):
+            return 0
         os.makedirs(config.THUMBS_DIR, exist_ok=True)
         for fname in datastore.list_remote_files("thumbs"):
             local = os.path.join(config.THUMBS_DIR, fname)

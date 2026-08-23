@@ -1199,6 +1199,9 @@ def auto_leech(client, message):
         if isinstance(kind, tuple) and kind[0] == "drive_token":
             from .handlers_driveauth import _handle_token_input
             return _handle_token_input(client, message, kind[1])
+        if isinstance(kind, tuple) and kind[0] == "drive_auth_code":
+            from .handlers_driveauth import _exchange_auth_code
+            return _exchange_auth_code(client, message, kind[1], message.text or "")
         if isinstance(kind, tuple) and kind[0] == "drive_rename":
             from .handlers_drive import handle_drive_rename
             return handle_drive_rename(client, message, kind[1], target)
@@ -1228,6 +1231,13 @@ def auto_leech(client, message):
     logger.info(f"chat {message.chat.id} auto-leech: {url}")
 
     # Same grammar as /m: "| name" rename and "#folder" Drive routing.
+    # Media pages get the quality picker exactly like /l (never a silent
+    # degraded 360p download).
     from .utils import parse_payload
     _, rename, folder = parse_payload(text)
+    host = _host_of(url)
+    is_media_page = any(host == h or host.endswith("." + h) for h in config.YTDLP_AUTO_HOSTS)
+    if is_media_page:
+        return show_quality_picker(client, message, url, "telegram", False,
+                                    rename=rename, folder=folder)
     dispatch_link(client, message, url, "telegram", rename=rename, folder=folder)

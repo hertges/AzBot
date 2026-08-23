@@ -4,7 +4,7 @@ from pyrogram.errors import FloodWait
 from pyrogram.enums import ParseMode
 
 from . import config, state, log
-from .utils import bar, fmtsz, fmt_time, smooth_speed, throttled_edit, split_file, cancel_kb
+from .utils import bar, fmtsz, fmt_time, smooth_speed, throttled_edit, split_file, cancel_kb, progress_line
 
 logger = log.get(__name__)
 
@@ -42,8 +42,9 @@ def _progress_cb(client, chat_id, msg_id, label, task_id=None):
         samples.append((current, now))
         if len(samples) > 6:
             samples.pop(0)
-        text = (f"{label}\n{bar(current, total)}\n"
-                f"`{fmtsz(current)} / {fmtsz(total)}`  •  {smooth_speed(samples)}")
+        text = (f"{label}\n"
+                f"{progress_line('☁️', current, total)}\n"
+                f"⚡ {smooth_speed(samples)}")
         markup = cancel_kb(task_id) if task_id else None
         throttled_edit(client, chat_id, msg_id, text, markup=markup, force=(current == total))
     return cb
@@ -59,6 +60,7 @@ def _clean_caption(fpath):
     return name[:1020] or "file"
 
 def _send_one(client, chat_id, fpath, msg_id, caption=None, reply_to=None, task_id=None, video_meta=None):
+    auto_thumbs = []   # temp frame-grab files, deleted after upload
     ext = os.path.splitext(fpath)[1].lower()
     kwargs = dict(
         chat_id=chat_id,
@@ -75,7 +77,14 @@ def _send_one(client, chat_id, fpath, msg_id, caption=None, reply_to=None, task_
     duration = int(meta.get("duration") or 0) or None
     width = int(meta.get("width") or 0) or None
     height = int(meta.get("height") or 0) or None
-    thumb = state.get_thumb(chat_id)   # custom /setthumb image if the user set one
+    # Thumbnail priority: user's /setthumb image → auto frame grab from the
+    # video itself (WZML-X parity: a frame at ~1/3 of the duration; fixes
+    # the black-thumbnail problem without any manual step).
+    thumb = state.get_thumb(chat_id)
+    if not thumb and ext in VIDEO_EXT and shutil.which("ffmpeg"):
+        thumb = _auto_video_thumb(fpath, duration)
+        if thumb:
+            auto_thumbs.append(thumb)   # deleted after upload
     for attempt in range(3):
         try:
             as_doc = state.get_as_document(chat_id)
@@ -100,8 +109,12 @@ def _send_one(client, chat_id, fpath, msg_id, caption=None, reply_to=None, task_
             else:
                 r = client.send_document(document=fpath, **kwargs)
             logger.info(f"uploaded to Telegram: {fpath} ({fmtsz(os.path.getsize(fpath))}) -> chat {chat_id}")
+            for t in auto_thumbs:
+                _cleanup(t)
             return r
         except CancelledError:
+            for t in auto_thumbs:
+                _cleanup(t)
             logger.info(f"[{task_id}] upload cancelled by user")
             raise
         except FloodWait as e:
@@ -226,6 +239,26 @@ def engine_probe_meta(fpath):
     """Lazy import to avoid a circular import at module load."""
     from . import engine
     return engine.probe_video_meta(fpath)
+
+
+def _auto_video_thumb(fpath, duration):
+    """Grabs a real frame from the video (~1/3 in, avoids black intros) as a
+    320px-wide JPEG for Telegram's thumbnail. Returns temp path or None.
+    The caller deletes it after upload — nothing is stored anywhere."""
+    import subprocess
+    try:
+        pos = max(1.0, (duration or 0.0) / 3.0)
+        out = fpath + ".thumb.jpg"
+        r = subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error",
+             "-ss", f"{pos:.2f}", "-i", fpath,
+             "-frames:v", "1", "-vf", "scale='min(320,iw)':-2", out],
+            capture_output=True, timeout=60)
+        if r.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 0:
+            return out
+    except Exception as e:
+        logger.warning(f"auto thumb grab failed for {fpath}: {e}")
+    return None
 
 
 def _cleanup(p):

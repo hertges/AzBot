@@ -3,7 +3,7 @@ import os, sys, time, re, subprocess, requests
 from yt_dlp import YoutubeDL
 
 from . import config, state, log
-from .utils import bar, fmtsz, fmt_time, smooth_speed, throttled_edit, cancel_kb
+from .utils import bar, fmtsz, fmt_time, smooth_speed, throttled_edit, cancel_kb, progress_line
 
 logger = log.get(__name__)
 
@@ -255,9 +255,8 @@ def download(url, chat_id, msg_id, task_id, client, dest_dir, format_selector=No
             speed = smooth_speed(samples)
             eta = d.get("eta")
             text = (
-                f"⬇️ Downloading…\n{bar(done, total)}\n"
-                f"`{fmtsz(done)} / {fmtsz(total)}`  •  {speed}"
-                + (f"  •  ETA {fmt_time(eta)}" if eta else "")
+                f"⬇️ <b>Downloading</b>\n{progress_line('⬇️', done, total)}\n"
+                f"⚡ {speed}" + (f"  •  ETA {fmt_time(eta)}" if eta else "")
             )
             throttled_edit(client, chat_id, msg_id, text, markup=cancel_kb(task_id))
         elif d["status"] == "finished":
@@ -348,7 +347,8 @@ def download_direct(url, chat_id, msg_id, task_id, client, dest_dir):
                 continue
             last_edit = now
             done, total, pct, spd = m.groups()
-            text = f"⬇️ Downloading…\n{bar(float(pct), 100)}\n`{done}/{total}` • {spd}/s"
+            text = (f"⬇️ <b>Downloading</b>\n"
+                    f"{progress_line('⬇️', float(done), float(total))}\n⚡ {spd}/s")
             throttled_edit(client, chat_id, msg_id, text, markup=cancel_kb(task_id))
     except (AttributeError, ValueError):
         # stdout can be None/closed when the process was just terminated

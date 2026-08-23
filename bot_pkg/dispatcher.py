@@ -2,7 +2,7 @@ import os, time, threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import state, uploader, drive, log
-from .utils import throttled_edit, fix_unknown_ext
+from .utils import throttled_edit, fix_unknown_ext, cancel_kb
 
 logger = log.get(__name__)
 
@@ -79,9 +79,25 @@ class LiveDispatcher:
                 uploader.upload_to_telegram(self.client, self.chat_id, fpath, self.msg_id,
                                              reply_to=self.reply_to, task_id=self.task_id)
             if self.dest in ("drive", "both") and drive.enabled():
+                # Drive uploads show their own progress on the task message
+                from .utils import progress_line
+                import time as _t
+                _t0 = _t.time()
+                last = [0.0]
+
+                def _dprog(done, total, _n=[0]):
+                    now = _t.time()
+                    if now - last[0] < 1.5 and done != total:
+                        return
+                    last[0] = now
+                    throttled_edit(self.client, self.chat_id, self.msg_id,
+                                   f"☁️ <b>Uploading to Drive</b>\n"
+                                   f"{progress_line('☁️', done, total, elapsed=now - _t0)}",
+                                   markup=cancel_kb(self.task_id) if self.task_id else None,
+                                   force=(done == total))
                 link = drive.upload_file(fpath, task_id=self.task_id,
                                          rename=self.rename, folder=self.folder,
-                                         chat_id=self.chat_id)
+                                         chat_id=self.chat_id, progress_cb=_dprog)
                 logger.info(f"uploaded to Drive: {fpath} -> {link}")
             self.sent += 1
         except state.CancelledError:

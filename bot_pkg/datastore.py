@@ -235,7 +235,7 @@ def pull_datafile(rel_path, local_path):
 
 
 def list_remote_files(rel_dir):
-    """[filename, ...] inside AzBotData/<rel_dir>/ (empty on any failure)."""
+    """[filename, ...] inside AzBotData/<rel_dir>/ ([] on any failure)."""
     try:
         from . import drive
         srv = drive.get_service(_account())
@@ -248,6 +248,24 @@ def list_remote_files(rel_dir):
     except Exception as e:
         logger.warning(f"datastore: list_remote_files({rel_dir}) failed: {e}")
         return []
+
+
+def remote_dir_exists(rel_dir):
+    """True only if AzBotData/<rel_dir>/ actually exists — lets optional
+    features (thumbs) skip their boot restore without touching Drive."""
+    try:
+        from . import drive
+        srv = drive.get_service(_account())
+        if not srv:
+            return False
+        parent = _ensure_path("")
+        safe = rel_dir.strip("/").replace("'", "\\'")
+        q = (f"name = '{safe}' and mimeType = 'application/vnd.google-apps.folder' "
+             f"and '{parent}' in parents and trashed = false")
+        res = srv.files().list(q=q, fields="files(id)", pageSize=1).execute()
+        return bool(res.get("files"))
+    except Exception:
+        return False
 
 
 def delete_remote_datafile(rel_path):

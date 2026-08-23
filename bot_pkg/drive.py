@@ -17,27 +17,55 @@ _srv_lock = threading.Lock()
 def enabled():
     return bool(config.DRIVE_ACCOUNTS)
 
+_srv_lock = threading.Lock()
+# ONE process-wide lock around every googleapiclient call: the shared
+# service object's httplib2 transport is NOT thread-safe — concurrent
+# requests from IG-archive workers + datastore mirrors corrupted the heap
+# ("free(): corrupted unsorted chunks") and killed the container twice on
+# Sevalla. Serializing all Drive API traffic trades a little throughput
+# for not dying mid-job.
+_api_lock = threading.RLock()
+
+
 def get_service(account=None):
+    """Returns a Drive service bound to THIS thread. Each worker thread gets
+    its own service instance (httplib2 objects must never be shared across
+    threads); creation and refresh are serialized by _api_lock."""
     name = account or state.DEFAULT_ACCOUNT
     if not name or name not in config.DRIVE_ACCOUNTS:
         return None
+    key = (name, threading.get_ident())
     with _srv_lock:
-        cached = _srv_cache.get(name)
+        cached = _srv_cache.get(key)
         if cached is not None:
             return cached
     from google.oauth2.credentials import Credentials
     from googleapiclient.discovery import build
-    a = config.DRIVE_ACCOUNTS[name]
-    creds = Credentials(
-        token=None, refresh_token=a["refresh_token"],
-        token_uri="https://oauth2.googleapis.com/token",
-        client_id=a["client_id"], client_secret=a["client_secret"],
-        scopes=["https://www.googleapis.com/auth/drive"],
-    )
-    srv = build("drive", "v3", credentials=creds, static_discovery=False, cache_discovery=False)
+    with _api_lock:
+        a = config.DRIVE_ACCOUNTS[name]
+        creds = Credentials(
+            token=None, refresh_token=a["refresh_token"],
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=a["client_id"], client_secret=a["client_secret"],
+            scopes=["https://www.googleapis.com/auth/drive"],
+        )
+        srv = build("drive", "v3", credentials=creds, static_discovery=False, cache_discovery=False)
     with _srv_lock:
-        _srv_cache[name] = srv   # googleapiclient http objects are thread-safe per call
+        _srv_cache[key] = srv
     return srv
+
+
+def api_locked():
+    """Context manager: serialize any multi-call Drive API sequence."""
+    class _Ctx:
+        def __enter__(self):
+            _api_lock.acquire()
+            return self
+
+        def __exit__(self, *exc):
+            _api_lock.release()
+            return False
+    return _Ctx()
 
 def _root_id(chat_id):
     """Uploads go to the chat's chosen account root (or DRIVE_FOLDER_ID if set)."""
@@ -210,7 +238,11 @@ def _upload_file_full_impl(fpath, progress_cb=None, task_id=None, rename=None,
         if task_id and state.is_cancelled(task_id):
             logger.info(f"[{task_id}] Drive upload cancelled by user")
             raise CancelledError("drive upload cancelled by user")
-        status, response = req.next_chunk(num_retries=3)
+        # next_chunk holds the socket for up to a 50MB chunk — hold the API
+        # lock across the whole resumable loop so no other thread touches
+        # this service's transport mid-request.
+        with _api_lock:
+            status, response = req.next_chunk(num_retries=3)
         if status and progress_cb:
             progress_cb(int(status.resumable_progress), int(status.total_size or 0))
     if make_public:

@@ -5,7 +5,7 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from . import config, state, drive, log
 from .core import app
-from .utils import new_task_id, throttled_edit, autoclean_if_enabled, guarded, safe_edit, esc
+from .utils import new_task_id, throttled_edit, autoclean_if_enabled, guarded, safe_edit, esc, progress_line, fmt_time
 from .dispatcher import LiveDispatcher
 from .handlers_core import Authorized, cancel_kb
 
@@ -311,18 +311,31 @@ def run_ig_archive_job(client, chat_id, msg_id, archive_type, username, task_id,
         threading.Thread(target=_watchdog, daemon=True).start()
 
         last_edit = 0.0
+        stats = {"downloaded": 0, "uploaded": 0}
+        t_start = time.time()
         try:
             for line in iter(proc.stdout.readline, ""):
                 last_activity[0] = time.time()
                 if state.is_cancelled(task_id):
                     break
                 full_log.append(line.rstrip())
+                # gallery-dl emits "Last-Modified: ... Downloaded: N" style
+                # counters per item; count real downloads for the progress
+                # display (WZML-X-style live counter + bar).
+                low = line.lower()
+                if "downloaded" in low or line.strip().startswith("./"):
+                    stats["downloaded"] += 1
                 now = time.time()
-                if now - last_edit >= 3:
+                if now - last_edit >= 2:
                     last_edit = now
-                    throttled_edit(client, chat_id, msg_id,
-                                    f"📷 @{esc(username)} — {archive_type}\n<code>{esc(line.strip()[:120])}</code>",
-                                    markup=cancel_kb(task_id))
+                    el = now - t_start
+                    rate = stats["downloaded"] / max(el, 1)
+                    throttled_edit(
+                        client, chat_id, msg_id,
+                        f"📷 <b>@{esc(username)}</b> — {esc(archive_type)}\n"
+                        f"{progress_line('⬇️', stats['downloaded'], 0)}\n"
+                        f"📥 {stats['downloaded']} fetched • ⚡ {rate:.1f}/s • ⏱ {fmt_time(el)}",
+                        markup=cancel_kb(task_id))
         except (AttributeError, ValueError):
             pass  # stdout closed by /cancel teardown — expected
         proc.wait()
@@ -341,6 +354,9 @@ def run_ig_archive_job(client, chat_id, msg_id, archive_type, username, task_id,
             disp.stop()
             return throttled_edit(client, chat_id, msg_id, "🛑 Cancelled.", force=True)
 
+        # Upload phase with its own live counter (old-bot style)
+        stats["uploaded"] = 0
+        t_up = time.time()
         throttled_edit(client, chat_id, msg_id, "☁️ Uploading results…", markup=cancel_kb(task_id), force=True)
         sent, errors = disp.finalize(timeout=1800)
 
@@ -354,9 +370,21 @@ def run_ig_archive_job(client, chat_id, msg_id, archive_type, username, task_id,
                 msg = f"❌ Couldn't fetch @{esc(username)} ({archive_type}) — may need a fresh cookie.\n<pre>{esc(tail[-1200:])}</pre>"
             return throttled_edit(client, chat_id, msg_id, msg, force=True)
 
-        summary = f"✅ @{esc(username)} ({archive_type}) — {sent} new file(s) → {config.DEST_LABEL[dest]}"
-        if errors:
-            summary += f"\n⚠️ {len(errors)} failed."
+        elapsed = int(time.time() - t_start)
+        skipped = max(stats["downloaded"] - sent, 0)
+        icon = {"posts": "📸", "stories": "📖", "reels": "🎬",
+                "highlights": "⭐", "tagged": "🏷️"}.get(archive_type, "📷")
+        summary = (f"✅ <b>@{esc(username)} archive complete!</b>\n\n"
+                   f"📥 {stats['downloaded']} new files\n"
+                   f"☁️ {sent} uploaded\n"
+                   f"⏭️ {skipped} skipped\n"
+                   f"{f'⚠️ {len(errors)} failed\n' if errors else ''}"
+                   f"⏱️ {fmt_time(elapsed)}\n"
+                   f"{icon} {esc(archive_type.title())}: {stats['downloaded']} ↓ • "
+                   f"{skipped} ⏭️ • {sent} ☁️\n"
+                   f"→ {config.DEST_LABEL[dest]}")
+        if dest == "drive":
+            summary += f"\n📁 Instagram/{esc(username)}/{esc(archive_type)}"
         throttled_edit(client, chat_id, msg_id, summary, force=True)
         # Mirror the (updated) index ledger into the Drive datastore.
         try:

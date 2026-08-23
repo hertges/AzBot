@@ -12,6 +12,7 @@ Requires GDrive_<name>_CLIENT_ID/_CLIENT_SECRET to already exist in .env
 GCP_CLIENT_ID/GCP_CLIENT_SECRET pair — that is reused for new accounts.
 """
 import os, re, time, threading, json
+from urllib.parse import urlencode
 
 from pyrogram import filters
 
@@ -109,8 +110,9 @@ def remove_account(name):
 
 
 def start_device_login(client, message, name):
-    """Begins the OAuth device flow for account `name`. Called from
-    /drivelogin <name> and from Settings → ☁️ Drive → ➕ Add account."""
+    """Old-bot flow: bot shows a Google authorization URL → user signs in,
+    copies the code/link → sends it back. Works with ANY desktop-type OAuth
+    client. Falls back to device sign-in codes only for TV-type clients."""
     name = re.sub(r"[^a-z0-9_-]", "", (name or "").lower())
     if not name:
         return message.reply_text("⚠️ Account name: letters/digits/-/_ only.")
@@ -123,43 +125,25 @@ def start_device_login(client, message, name):
             "<code>GDrive_" + esc(name) + "_CLIENT_ID/_CLIENT_SECRET</code> to `.env` "
             "(or a shared <code>GCP_CLIENT_ID/GCP_CLIENT_SECRET</code>), then retry.")
 
-    status = message.reply_text("🔑 Requesting a device code from Google…")
-    import requests as rq
-    try:
-        r = rq.post("https://oauth2.googleapis.com/device/code", data={
-            "client_id": cid, "scope": SCOPES,
-        }, timeout=15)
-        d = r.json()
-    except Exception as e:
-        return safe_edit(client, message.chat.id, status.id, f"❌ {esc(e)}")
-    if "device_code" not in d:
-        err = str(d.get("error", d))
-        hint = ""
-        if "invalid_client" in err or "Limited Input" in err or "TVs" in err:
-            hint = (
-                "\n\n<b>Why:</b> your Google OAuth client isn't a <b>'TVs and Limited Input "
-                "devices'</b> type, which is the only kind that works with sign-in codes.\n\n"
-                "<b>Easiest fix instead:</b> on your PC run the bot's helper once:\n"
-                "<code>python gen_token.py work</code>\n"
-                "it signs in via your browser and saves <code>token_work.pickle</code> — then just "
-                "send that file here as a reply to <code>/tokenup work</code>.")
-        return safe_edit(client, message.chat.id, status.id,
-                          f"❌ Google said: <code>{esc(err[:300])}</code>{hint}")
-
-    _pending[message.chat.id] = {
-        "name": name, "device_code": d["device_code"],
-        "user_code": d.get("user_code", ""), "interval": int(d.get("interval", 5)),
-        "expires": time.time() + int(d.get("expires_in", 1800)),
-    }
-    safe_edit(
-        client, message.chat.id, status.id,
-        "☁️ <b>Add this Drive account</b>\n\n"
-        f"1️⃣ Open: {DEVICE_URL}\n"
-        f"2️⃣ Sign in with the Google account you want as <b>{esc(name)}</b>\n"
-        f"3️⃣ Enter code: <code>{d.get('user_code', '?')}</code>\n\n"
-        "I'll detect approval automatically (checking every few seconds).")
-
-    threading.Thread(target=_poll_approval, daemon=True).start()
+    state.set_awaiting_input(message.chat.id, ("drive_auth_code", name), None)
+    auth_url = ("https://accounts.google.com/o/oauth2/auth?"
+                + urlencode({
+                    "client_id": cid,
+                    "redirect_uri": "urn:ietf:wg:oauth:2.0:oob",
+                    "response_type": "code",
+                    "scope": SCOPES,
+                    "access_type": "offline",
+                    "prompt": "consent",
+                  }))
+    message.reply_text(
+        f"☁️ <b>Please follow these steps to login:</b>\n\n"
+        f"1️⃣ Open the <a href=\"{auth_url}\">Authorization URL</a>\n"
+        f"2️⃣ Sign in with your Google Drive account\n"
+        f"3️⃣ Give permission to access Google Drive\n"
+        f"4️⃣ Copy the generated code or link and send it to me\n\n"
+        f"💡 The account will be saved as <b>{esc(name)}</b>. "
+        f"Send /cancel to abort.",
+        disable_web_page_preview=True)
 
 
 @app.on_message(filters.command(["drivelogin", "addaccount"]) & AdminOnly)
@@ -267,6 +251,48 @@ def _handle_token_input(client, message, name):
         return message.reply_text(f"❌ {esc(e)}")
     message.reply_text(
         f"✅ Drive account <b>{esc(name)}</b> registered and saved (survives restarts). "
+        f"Switch chats to it in /settings → ☁️ Drive.")
+
+
+def _exchange_auth_code(client, message, name, text):
+    """Step 2 of the old-bot flow: user pasted the code or the redirect
+    link — exchange it for a refresh token and register the account."""
+    raw = (text or "").strip()
+    # accept either the bare code or a full redirect URL containing ?code=
+    m = re.search(r"[?&]code=([\w\-]+)", raw)
+    code = m.group(1) if m else raw.split()[0]
+    cid, csec = _client_pair(name)
+    if not cid:
+        return message.reply_text("❌ Client credentials vanished — start again with /drivelogin.")
+    status = message.reply_text("🔑 Exchanging authorization code…")
+    import requests as rq
+    try:
+        r = rq.post("https://oauth2.googleapis.com/token", data={
+            "code": code,
+            "client_id": cid,
+            "client_secret": csec,
+            "redirect_uri": "urn:ietf:wg:oauth:2.0:oob",
+            "grant_type": "authorization_code",
+        }, timeout=20)
+        d = r.json()
+    except Exception as e:
+        return safe_edit(client, message.chat.id, status.id, f"❌ {esc(e)}")
+    if "refresh_token" not in d:
+        err = d.get("error_description") or str(d)[:200]
+        hint = ""
+        if "code was already redeemed" in err:
+            hint = "\n<i>The code can only be used once — send /drivelogin again for a fresh URL.</i>"
+        elif "invalid_grant" in err:
+            hint = "\n<i>Code expired or wrong — send /drivelogin again.</i>"
+        return safe_edit(client, message.chat.id, status.id,
+                          f"❌ Google said: <code>{esc(err[:250])}</code>{hint}")
+    try:
+        _register_account(name, d["refresh_token"])
+    except Exception as e:
+        return safe_edit(client, message.chat.id, status.id, f"❌ {esc(e)}")
+    safe_edit(
+        client, message.chat.id, status.id,
+        f"✅ Drive account <b>{esc(name)}</b> added and saved (survives restarts).\n"
         f"Switch chats to it in /settings → ☁️ Drive.")
 
 

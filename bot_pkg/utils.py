@@ -162,6 +162,33 @@ def fmt_time(s):
     if m: return f"{m}m {s}s"
     return f"{s}s"
 
+
+# ── Progress bar renderer (used by every download/upload step) ──────────
+def pbar(pct, width=12):
+    """▓▓▓░░░ style bar. Concise but readable at a glance."""
+    pct = max(0, min(100, pct))
+    filled = int(width * pct / 100)
+    return "▓" * filled + "░" * (width - filled)
+
+
+def progress_line(label, done, total, elapsed=None):
+    """One-line HTML status:
+    ⬇️ Downloading ▓▓▓░░░ 42% • 210 MB / 500 MB • 00:12 left
+    """
+    pct = (done / total * 100) if total else 0
+    parts = [f"{esc(label)} {pbar(pct)} <b>{pct:.0f}%</b>"]
+    if total:
+        parts.append(f"{fmtsz(done)} / {fmtsz(total)}")
+    else:
+        parts.append(fmtsz(done))
+    if elapsed is not None and done > 0 and total > done:
+        speed = done / max(elapsed, 0.001)
+        eta = (total - done) / speed
+        parts.append(f"{fmt_time(eta)} left")
+    elif elapsed is not None:
+        parts.append(f"⚡ {fmtsz(done / max(elapsed, 0.001))}/s")
+    return " • ".join(parts)
+
 def bar(done, total, L=14):
     if total <= 0:
         return "[" + "░" * L + "] 0.0%"
@@ -169,6 +196,10 @@ def bar(done, total, L=14):
     f = int(L * pct / 100)
     blocks = "█" * f + "░" * (L - f)
     return f"[{blocks}] {pct:.1f}%"
+
+# unify: the old bar(done,total) callers now get the same ▓ style
+def _bar_compat(done, total, L=14):
+    return pbar((done / total * 100) if total else 0, width=L)
 
 def smooth_speed(samples):
     if len(samples) < 2:

@@ -41,6 +41,10 @@ _ANSI_RE = re.compile(
     r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\x1b[BDEHMc789=>]|\x07")
 # readline's backspace echo: pair + the character it erases
 _BS_ERASE_RE = re.compile(r"(.)\x08 \x08", re.S)
+# Any remaining C0/C1 control char (except \n) and any non-BMP char —
+# Telegram's entity offsets are UTF-16 code units; astral-plane chars count
+# as 2 and desync our computed bounds → ENTITY_BOUNDS_INVALID.
+_CTRL_RE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f-\x9f\U00010000-\U0010ffff]")
 
 def _clean(text):
     text = text.replace("\r\n", "\n").replace("\r", "")
@@ -52,7 +56,10 @@ def _clean(text):
         if not m:
             break
         text = text[:m.start()] + text[m.end():]
-    return _ANSI_RE.sub("", text)
+    text = _ANSI_RE.sub("", text)
+    # Final safety net: any control/astral char that survived would break
+    # Telegram's entity bounds on edit — drop them.
+    return _CTRL_RE.sub("", text)
 
 
 def _is_admin_user(user_id):
