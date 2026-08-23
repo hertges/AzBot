@@ -366,6 +366,47 @@ def pop_retry_token(token):
         return None
     return t
 
+# ── WZML-X-style format menu storage ─────────────────────────────────────
+# The real format table must outlive the probe (buttons reference it by
+# index). Kept per token with a TTL sweeper on access.
+_picker_formats = {}
+_picker_pending = {}
+PICKER_TTL = 900
+
+def save_picker_formats(token, title, options):
+    _picker_formats[token] = {"title": title, "options": options, "ts": time.time()}
+
+class PickerFormats:
+    @classmethod
+    def save(cls, token, title, options):
+        save_picker_formats(token, title, options)
+
+    @classmethod
+    def load(cls, token):
+        e = _picker_formats.get(token)
+        if not e or time.time() - e["ts"] > PICKER_TTL:
+            _picker_formats.pop(token, None)
+            return "", []
+        # prune stale siblings occasionally
+        if len(_picker_formats) > 64:
+            now = time.time()
+            for k in [k for k, v in _picker_formats.items() if now - v["ts"] > PICKER_TTL]:
+                _picker_formats.pop(k, None)
+        return e["title"], e["options"]
+
+class PickerPending:
+    """Video-only selector waiting for its audio-merge choice."""
+    @classmethod
+    def save(cls, token, selector):
+        _picker_pending[token] = (selector, time.time())
+
+    @classmethod
+    def take(cls, token):
+        e = _picker_pending.pop(token, None)
+        if not e or time.time() - e[1] > PICKER_TTL:
+            return None
+        return e[0]
+
 # ── Pending /ig multi-select archive-type sessions ──────────────────────
 _ig_picker_sessions = {}
 IG_PICKER_TTL = 600

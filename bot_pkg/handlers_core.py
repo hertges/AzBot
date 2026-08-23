@@ -567,25 +567,122 @@ def show_quality_picker(client, message, url, dest, zip_output, rename=None, fol
 
 
 def _do_picker(client, message, status_id, url, dest, zip_output, rename, folder, title, options):
+    """WZML-X-style menu: one button per real format. Video-only formats go
+    through a second step asking which audio to merge."""
     token = state.new_quality_session(url, dest, zip_output, message.id)
     state.QualityExtra.save(token, rename=rename, folder=folder)
+    state.PickerFormats.save(token, title, options)
     rows, row = [], []
-    for label, selector in options:
-        row.append(InlineKeyboardButton(label, callback_data=f"ytq:{token}:{selector}"))
+
+    def add_btn(label, data):
+        row.append(InlineKeyboardButton(label[:60], callback_data=data))
         if len(row) == 2:
             rows.append(row); row = []
+
+    for i, opt in enumerate(options):
+        add_btn(opt["label"], f"ytf:{token}:{i}")
     if row:
         rows.append(row)
-    rows.append([InlineKeyboardButton("⬇️ Best (skip menu)", callback_data=f"ytq:{token}:bv*+ba/b"),
-                 InlineKeyboardButton("❌ Cancel", callback_data=f"ytqcancel:{token}")])
+    rows.append([InlineKeyboardButton("❌ Cancel", callback_data=f"ytqcancel:{token}")])
 
     client.edit_message_text(
         message.chat.id, status_id,
-        f"🎬 <b>{esc(title[:80])}</b>\n\nPick a quality:",
+        f"🎬 <b>{esc(title[:70])}</b>\n<i>Choose video quality:</i>",
         reply_markup=InlineKeyboardMarkup(rows),
     )
 
 
+@app.on_callback_query(filters.regex(r"^ytf:"))
+@guarded
+def cb_format_pick(client, cq):
+    """A concrete format was chosen. If it's video-only, show the WZML-X
+    second step: pick the audio track to merge (or keep as-is)."""
+    _, token, idx = cq.data.split(":", 2)
+    session = state.get_quality_session(token)
+    if not session:
+        return cq.answer("Expired — send the link again.", show_alert=True)
+    title, options = state.PickerFormats.load(token)
+    if not options or int(idx) >= len(options):
+        return cq.answer("Menu expired.", show_alert=True)
+    opt = options[int(idx)]
+
+    if not opt.get("needs_audio"):
+        return _launch_leech_from_menu(client, cq, token, session, opt["selector"])
+
+    # ── step 2: audio merge choice ──
+    aud_rows = [
+        [InlineKeyboardButton("🎵 Best Audio", callback_data=f"ytm:{token}:{idx}:ba")],
+        [InlineKeyboardButton("🎵 Medium", callback_data=f"ytm:{token}:{idx}:mid")],
+        [InlineKeyboardButton("🔇 No audio", callback_data=f"ytm:{token}:{idx}:none")],
+        [InlineKeyboardButton("⬅️ Back", callback_data=f"ytback:{token}")],
+    ]
+    state.PickerPending.save(token, opt["selector"])
+    safe_edit(cq, "🎚 <b>Merge which audio?</b>", reply_markup=InlineKeyboardMarkup(aud_rows))
+    cq.answer()
+
+
+@app.on_callback_query(filters.regex(r"^ytback:"))
+@guarded
+def cb_format_back(client, cq):
+    token = cq.data.split(":", 1)[1]
+    session = state.get_quality_session(token)
+    if session:
+        try:
+            status = cq.message
+            title, options = state.PickerFormats.load(token)
+            _do_picker(client, status, status.id, session["url"], session["dest"],
+                       session["zip_output"], None, None, title, options)
+            return cq.answer()
+        except Exception:
+            pass
+    cq.answer("Expired — send the link again.", show_alert=True)
+
+
+@app.on_callback_query(filters.regex(r"^ytm:"))
+@guarded
+def cb_audio_pick(client, cq):
+    _, token, idx, achoice = cq.data.split(":", 3)
+    session = state.pop_quality_session(token)
+    if not session:
+        return cq.answer("Expired — send the link again.", show_alert=True)
+    vid_sel = state.PickerPending.take(token)
+    if not vid_sel:
+        return cq.answer("Session lost — send the link again.", show_alert=True)
+    extra = state.QualityExtra.take(token)
+
+    audio_map = {"ba": "ba", "mid": "ba[abr<=128]/ba", "none": ""}
+    selector = f"{vid_sel}+{audio_map[achoice]}" if achoice != "none" else vid_sel
+    cq.answer()
+    _launch_status_and_job(client, cq.message.chat.id, cq.message.id, session,
+                           selector, extra)
+
+
+def _launch_leech_from_menu(client, cq, token, session, selector):
+    extra = state.QualityExtra.take(token)
+    state.pop_quality_session(token)
+    cq.answer()
+    _launch_status_and_job(client, cq.message.chat.id, cq.message.id, session,
+                           selector, extra)
+
+
+def _launch_status_and_job(client, chat_id, reply_msg_id_unused, session,
+                           selector, extra):
+    task_id = new_task_id()
+    tag = f" 📦→{config.DEST_LABEL[session['dest']]}" if session["zip_output"] else f" →{config.DEST_LABEL[session['dest']]}"
+    status = app.send_message(
+        chat_id,
+        f"🔎 Queued{tag} — <code>{esc(task_id)}</code>",
+        reply_markup=cancel_kb(task_id))
+    task_dir = os.path.join(config.DOWNLOAD_DIR, task_id)
+    state.register_job(task_id, chat_id, status.id, "yt-dlp", task_dir)
+    state.task_queue.put((run_leech_job,
+                           (client, chat_id, status.id, session["url"], task_id,
+                            session["reply_to"], session["dest"], session["zip_output"],
+                            selector, extra.get("rename"), extra.get("folder"))))
+
+
+# Legacy ytq: handler kept for the old bucket-style callbacks (in case an
+# old message is still on screen) and the plain "Best" path.
 @app.on_callback_query(filters.regex(r"^ytq:"))
 @guarded
 def cb_quality_pick(client, cq):
@@ -595,7 +692,6 @@ def cb_quality_pick(client, cq):
         return cq.answer("This picker expired — send the link again.", show_alert=True)
     extra = state.QualityExtra.take(token)
     cq.answer()
-    safe_edit(cq, "⚡ Queued…")
     task_id = new_task_id()
     tag = f" 📦→{config.DEST_LABEL[session['dest']]}" if session["zip_output"] else f" →{config.DEST_LABEL[session['dest']]}"
     status = cq.message.reply_text(f"🔎 Queued{tag} — <code>{esc(task_id)}</code>", reply_markup=cancel_kb(task_id))

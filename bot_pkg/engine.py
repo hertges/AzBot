@@ -129,156 +129,95 @@ def probe(url, chat_id):
     with YoutubeDL(opts) as ydl:
         return ydl.extract_info(url, download=False)
 
-# Common resolution tiers to offer in the quality picker — WZML-X-style,
-# rather than blindly grabbing "best" and hoping a format's available.
-_QUALITY_TIERS = (2160, 1440, 1080, 720, 480, 360, 240)
+# ── WZML-X-style format listing ──────────────────────────────────────────
+# WZML-X never guesses resolution buckets: it extracts the REAL format table
+# and renders one button per usable format (exact size, container, fps),
+# then asks which audio track to merge into video-only formats. This module
+# mirrors that flow.
 
 def _fmt_size(b):
     if not b:
         return ""
+    b = float(b)
     for unit in ("B", "KB", "MB", "GB"):
         if b < 1024:
-            return f"{b:.1f} {unit}" if unit != "B" else f"{int(b)} B"
+            return f"{b:.0f}{unit}" if unit == "B" else f"{b:.1f}{unit}"
         b /= 1024
-    return f"{b:.1f} TB"
+    return f"{b:.1f}TB"
+
+
+def _est_bytes(f, duration):
+    """Exact size when reported; otherwise bitrate × duration estimate."""
+    s = f.get("filesize") or f.get("filesize_approx")
+    if s:
+        return int(s)
+    br = f.get("tbr") or 0
+    return int(br * 1000 / 8 * duration) if br and duration else 0
+
 
 def probe_qualities(url, chat_id):
-    """Probes url and returns (title, [(label, format_selector), ...]) for
-    a quality-picker keyboard — actual available resolutions with their
-    approximate file sizes (WZML-X shows sizes next to each quality), plus
-    Best and Audio-only options."""
+    """Returns (title, options) where options is a list of dicts:
+      {label, selector, needs_audio}
+    built straight from the extractor's format table — WZML-X style."""
     info = probe(url, chat_id)
     if info.get("_type") == "playlist":
         entries = info.get("entries") or [{}]
         info = entries[0] or {}
 
-    formats = info.get("formats") or []
-    options = []
-    seen = set()
-    heights = sorted({f.get("height") for f in formats if f.get("height")}, reverse=True)
-    for h in heights:
-        bucket = next((b for b in _QUALITY_TIERS if h >= b), None)
-        if bucket and bucket not in seen:
-            seen.add(bucket)
-            label = f"🎬 {bucket}p"
-            sz = _bucket_size(formats, info, bucket)
-            if sz:
-                label += f" ({sz})"
-            options.append((label, f"bv*[height<={bucket}]+ba/b[height<={bucket}]"))
-        if len(options) >= 5:
-            break
-    best_sz = _bucket_size(formats, info, None)
-    options.append(("🎬 Best (auto)" + (f" (~{best_sz})" if best_sz else ""), "bv*+ba/b"))
-    aud_sz = _audio_size(formats, info)
-    options.append(("🎵 Audio only (mp3)" + (f" (~{aud_sz})" if aud_sz else ""), "audio"))
+    formats = [f for f in (info.get("formats") or [])
+               if f.get("format_id")
+               and f.get("vcodec") != "mhtml"          # storyboards
+               and not (f.get("vcodec") == "none" and f.get("acodec") == "none")]
+    duration = info.get("duration") or 0
+
+    # ── video formats: one entry per (height, ext), highest bitrate wins,
+    #    sorted high→low — exactly what WZML-X's YtDlpButtonMenu shows.
+    vids = {}
+    auds = []
+    for f in formats:
+        if f.get("vcodec", "none") != "none" and f.get("height"):
+            key = (f["height"], f.get("ext", "?"))
+            cur = vids.get(key)
+            if cur is None or (_est_bytes(f, duration) or 0) > (_est_bytes(cur, duration) or 0):
+                vids[key] = f
+        elif f.get("acodec", "none") != "none":
+            auds.append(f)
+
+    options = [{"label": "⚡ BEST (V+A)", "selector": "bv*+ba/b", "needs_audio": False}]
+
+    def codec_tag(c):
+        c = (c or "").split(".")[0]
+        return {"av01": "av1", "vp9": "vp9", "vp09": "vp9",
+                "h264": "h264", "mp4a": "aac"}.get(c, c[:4])
+
+    for (h, ext_) in sorted(vids.keys(), reverse=True):
+        f = vids[(h, ext_)]
+        fps = f.get("fps")
+        fps_s = f"{fps}@" if fps and fps != 25 else ""
+        sz = _est_bytes(f, duration)
+        tag = codec_tag(f.get("vcodec"))
+        note = " (no audio)" if f.get("acodec") == "none" else ""
+        label = f"{h}p{fps_s} {ext_} {_fmt_size(sz)} {tag}{note}".strip()
+        options.append({
+            "label": label[:60],
+            # bare format id: the audio-merge step composes "id+audio".
+            # (Appending "+ba/b" here too would produce "id+ba/b+ba".)
+            "selector": f["format_id"],
+            "needs_audio": f.get("acodec") == "none",
+            "vid_id": f["format_id"],
+        })
+
+    for f in sorted(auds, key=lambda x: x.get("abr") or 0, reverse=True)[:3]:
+        abr = int(f.get("abr") or 0)
+        sz = _est_bytes(f, duration)
+        options.append({
+            "label": f"🎵 {abr}K {f.get('ext','?')} {_fmt_size(sz)}".strip(),
+            "selector": f["format_id"],
+            "needs_audio": False,
+        })
+
     return info.get("title", "video"), options
 
-
-def _est_bytes(f, duration):
-    s = f.get("filesize") or f.get("filesize_approx")
-    if s:
-        return s
-    br = f.get("tbr") or 0
-    return br * 1000 / 8 * duration if br and duration else 0
-
-
-def _bucket_size(formats, info, max_height):
-    """Rough per-bucket size: biggest reported filesize (or bitrate×duration
-    estimate) among video formats ≤ max_height (None = any), plus the best
-    audio track. Adaptive streams often omit filesize — hence the estimate."""
-    dur = info.get("duration") or 0
-    vids = [f for f in formats if f.get("height") and (max_height is None or f["height"] <= max_height)]
-    auds = [f for f in formats if not f.get("height")]
-    total = max((_est_bytes(f, dur) for f in vids), default=0) + max((_est_bytes(f, dur) for f in auds), default=0)
-    return _fmt_size(total) if total else ""
-
-
-def _audio_size(formats, info):
-    dur = info.get("duration") or 0
-    auds = [f for f in formats if not f.get("height")]
-    total = max((_est_bytes(f, dur) for f in auds), default=0)
-    return _fmt_size(total) if total else ""
-
-
-def _ffprobe_meta(fpath):
-    """Returns {duration, width, height} via ffprobe, or {} if unavailable/
-    not a media file. Cheap (reads only headers)."""
-    import subprocess as sp
-    try:
-        out = sp.run(
-            ["ffprobe", "-v", "error", "-select_streams", "v:0",
-             "-show_entries", "stream=width,height,duration:format=duration",
-             "-of", "json", fpath],
-            capture_output=True, text=True, timeout=20,
-        ).stdout
-        import json as _j
-        d = _j.loads(out or "{}")
-        st = ((d.get("streams") or [{}])[0])
-        meta = {
-            "duration": float(st.get("duration") or d.get("format", {}).get("duration") or 0) or None,
-            "width": st.get("width"),
-            "height": st.get("height"),
-        }
-        return {k: v for k, v in meta.items() if v}
-    except Exception:
-        return {}
-
-
-def fix_media_metadata(fpath):
-    """WZML-X-style metadata pass before upload. yt-dlp's ffmpeg merge can
-    produce files whose container-level duration/dimensions are missing or
-    wrong (Telegram then displays the video as "0 seconds"). Remuxing with
-    `-c copy` rewrites the header from the actual elementary streams without
-    recoding — near-instant, lossless, and fixes the tag problem at the
-    source. Falls back silently to the original file if ffmpeg is missing
-    or the file isn't remuxable."""
-    ext = os.path.splitext(fpath)[1].lower().lstrip(".")
-    if ext not in ("mp4", "mkv", "webm", "mov", "m4v", "ts", "mpg"):
-        return fpath
-    if not shutil_which("ffmpeg"):
-        return fpath
-    # Temp output keeps the ORIGINAL extension — ffmpeg picks its muxer from
-    # it (mp4/matroska/mpegts…), then we atomically swap the remuxed file in.
-    tmp = f"{fpath}.remux.{ext}"
-    args = ["ffmpeg", "-y", "-loglevel", "error", "-i", fpath,
-            "-map", "0", "-c", "copy", "-movflags", "+faststart", tmp]
-    try:
-        import subprocess as sp
-        r = sp.run(args, capture_output=True, text=True, timeout=300)
-        if r.returncode != 0 or not os.path.exists(tmp) or os.path.getsize(tmp) == 0:
-            _rm(tmp)
-            return fpath
-        # Keep the ORIGINAL extension (the container type doesn't change in
-        # a stream-copy remux; only headers are rewritten).
-        os.replace(tmp, fpath)
-    except Exception as e:
-        logger.warning(f"metadata remux failed for {fpath}: {e}")
-        _rm(tmp)
-    return fpath
-
-
-def _rm(p):
-    try:
-        if p and os.path.exists(p):
-            os.remove(p)
-    except OSError:
-        pass
-
-
-def probe_video_meta(fpath):
-    """Duration/dimensions for Telegram upload attributes — read straight
-    off the final file so they're always right, never guessed."""
-    m = _ffprobe_meta(fpath)
-    return {
-        "duration": int(m["duration"]) if m.get("duration") else 0,
-        "width": int(m["width"]) if m.get("width") else 0,
-        "height": int(m["height"]) if m.get("height") else 0,
-    }
-
-
-def shutil_which(name):
-    import shutil
-    return shutil.which(name)
 
 def download(url, chat_id, msg_id, task_id, client, dest_dir, format_selector=None):
     """Downloads url via yt-dlp into dest_dir, editing the status message
