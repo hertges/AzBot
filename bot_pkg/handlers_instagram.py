@@ -102,7 +102,7 @@ def cmd_igindex(client, message):
 
 
 def _send_index_manager(chat_id, edit_msg=None):
-    entries = state.list_ig_indexes(chat_id)
+    entries = state.list_ig_indexes()
     total_kb = 0
     lines = []
     by_user = {}
@@ -117,9 +117,9 @@ def _send_index_manager(chat_id, edit_msg=None):
     for u in sorted(by_user):
         types = ", ".join(f"{ARCHIVE_LABEL.get(t, t)}: {n}" for t, n in by_user[u])
         lines.append(f"• <b>{esc(u)}</b> — {types}")
-    text = (f"🗂 <b>Instagram indexes</b> <i>(this chat)</i>\n\n"
+    text = (f"🗂 <b>Instagram indexes</b>\n\n"
             + ("\n".join(lines) if lines else "_No indexes yet — they're created on your first /ig archive._")
-            + f"\n\nTotal: {len(entries)} ledger(s), ~{total_kb} KB • stored locally, not in Drive")
+            + f"\n\nTotal: {len(entries)} ledger(s), ~{total_kb} KB • shared across chats, mirrored to Drive")
 
     rows = []
     for u in sorted(by_user):
@@ -144,7 +144,7 @@ def cb_igidx_open(client, cq):
 @guarded
 def cb_igidx_user(client, cq):
     username = cq.data.split(":", 1)[1]
-    entries = [t for u, t in state.list_ig_indexes(cq.message.chat.id) if u == username]
+    entries = [t for u, t in state.list_ig_indexes() if u == username]
     rows = [[InlineKeyboardButton(f"🗑 {ARCHIVE_LABEL.get(t, t)} ({t})",
                                   callback_data=f"igidxt:{username}:{t}")]
             for t in sorted(entries)]
@@ -160,8 +160,7 @@ def cb_igidx_user(client, cq):
 def cb_igidx_delete(client, cq):
     payload = cq.data.split(":", 1)[1]
     username, atype = payload.rsplit(":", 1)
-    n = state.delete_ig_index(cq.message.chat.id,
-                              username=None if atype == "all" else username,
+    n = state.delete_ig_index(username=None if atype == "all" else username,
                               archive_type=None if atype == "all" else atype)
     label = "ALL types" if atype == "all" else atype
     cq.answer(f"🗑 Deleted {n} ledger(s) ({label}).", show_alert=True)
@@ -171,7 +170,7 @@ def cb_igidx_delete(client, cq):
 @app.on_callback_query(filters.regex(r"^igidxwipe$"))
 @guarded
 def cb_igidx_wipe(client, cq):
-    n = state.delete_ig_index(cq.message.chat.id)
+    n = state.delete_ig_index()
     cq.answer(f"💥 Wiped {n} ledger(s). Next archives start fresh.", show_alert=True)
     _send_index_manager(cq.message.chat.id, edit_msg=cq.message.id)
 
@@ -306,17 +305,20 @@ def run_ig_archive_job(client, chat_id, msg_id, archive_type, username, task_id,
         threading.Thread(target=_watchdog, daemon=True).start()
 
         last_edit = 0.0
-        for line in iter(proc.stdout.readline, ""):
-            last_activity[0] = time.time()
-            if state.is_cancelled(task_id):
-                break
-            full_log.append(line.rstrip())
-            now = time.time()
-            if now - last_edit >= 3:
-                last_edit = now
-                throttled_edit(client, chat_id, msg_id,
-                                f"📷 @{esc(username)} — {archive_type}\n<code>{esc(line.strip()[:120])}</code>",
-                                markup=cancel_kb(task_id))
+        try:
+            for line in iter(proc.stdout.readline, ""):
+                last_activity[0] = time.time()
+                if state.is_cancelled(task_id):
+                    break
+                full_log.append(line.rstrip())
+                now = time.time()
+                if now - last_edit >= 3:
+                    last_edit = now
+                    throttled_edit(client, chat_id, msg_id,
+                                    f"📷 @{esc(username)} — {archive_type}\n<code>{esc(line.strip()[:120])}</code>",
+                                    markup=cancel_kb(task_id))
+        except (AttributeError, ValueError):
+            pass  # stdout closed by /cancel teardown — expected
         proc.wait()
 
         if stalled.is_set():

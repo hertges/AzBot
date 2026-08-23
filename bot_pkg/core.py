@@ -109,9 +109,16 @@ def start():
         importlib.reload(state)
     except Exception as e:
         logger.warning(f"datastore settings restore skipped: {e}")
+    # Telegram-registered Drive accounts (overrides.json) over env ones.
+    try:
+        from . import handlers_driveauth
+        handlers_driveauth._load_overrides_into_config()
+    except Exception as e:
+        logger.warning(f"drive overrides load skipped: {e}")
     from . import (handlers_core, handlers_admin, handlers_shell, handlers_subproc,
-                   handlers_instagram, handlers_drive, handlers_zip, handlers_fallback)  # noqa: F401
-    logger.info("handlers registered: core, admin+shell, subproc, instagram+zip, drive, fallback")
+                   handlers_instagram, handlers_drive, handlers_zip,
+                   handlers_driveauth, handlers_fallback)  # noqa: F401
+    logger.info("handlers registered: core, admin+shell, subproc, instagram+zip, drive+auth, fallback")
     _start_workers()
     threading.Thread(target=_purge_loop, daemon=True).start()
     threading.Thread(target=_yt_dlp_update_loop, daemon=True).start()

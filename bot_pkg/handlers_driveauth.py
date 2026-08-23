@@ -1,0 +1,190 @@
+"""Add & switch Drive accounts from Telegram via Google's OAuth 2.0
+**device flow** — no console, no redirect URLs:
+
+    /drivelogin <name>   → bot shows a google.com/device code + link
+    (user opens it, signs in, types the code)
+    → bot polls in the background, saves the refresh token as
+      GDrive_<name>_REFRESH_TOKEN into data/overrides.json and registers
+      the account live.
+
+Requires GDrive_<name>_CLIENT_ID/_CLIENT_SECRET to already exist in .env
+(client credentials can't be created by a bot), OR the shared
+GCP_CLIENT_ID/GCP_CLIENT_SECRET pair — that is reused for new accounts.
+"""
+import os, re, time, threading, json
+
+from pyrogram import filters
+
+from . import config, state, drive, datastore, log
+from .core import app
+from .utils import guarded, esc, safe_edit
+from .handlers_core import Authorized, AdminOnly
+
+logger = log.get(__name__)
+
+DEVICE_URL = "https://accounts.google.com/device"
+TOKEN_URL = "https://oauth2.googleapis.com/token"
+SCOPES = "https://www.googleapis.com/auth/drive"
+
+OVERRIDES_FILE = os.path.join(config.DATA_DIR, "overrides.json")
+_pending = {}   # chat_id -> {name, device_code, user_code, interval, expires}
+
+
+def _client_pair(name):
+    """Client ID/secret to use for account `name`: its own env vars if set,
+    otherwise the shared GCP_* pair."""
+    a = config.DRIVE_ACCOUNTS.get(name)
+    if a:
+        return a["client_id"], a["client_secret"]
+    cid = os.environ.get("GCP_CLIENT_ID", "").strip()
+    csec = os.environ.get("GCP_CLIENT_SECRET", "").strip()
+    return (cid, csec) if cid and csec else (None, None)
+
+
+def _save_override(name, refresh_token):
+    data = state._load_json(OVERRIDES_FILE, {})
+    data[f"GDrive_{name}_REFRESH_TOKEN"] = refresh_token
+    state._save_json(OVERRIDES_FILE, data)
+
+
+def _register_account(name, refresh_token):
+    """Registers/replaces an account at runtime + persists the token."""
+    cid, csec = _client_pair(name)
+    if not cid:
+        raise RuntimeError(f"no client credentials for '{name}'")
+    config.DRIVE_ACCOUNTS[name] = {
+        "client_id": cid, "client_secret": csec, "refresh_token": refresh_token,
+    }
+    with drive._srv_lock:
+        drive._srv_cache.pop(name, None)
+    if not state.DEFAULT_ACCOUNT:
+        state.DEFAULT_ACCOUNT = name
+    _save_override(name, refresh_token)
+    logger.info(f"drive account '{name}' registered via Telegram OAuth")
+
+
+def _load_overrides_into_config():
+    """Boot-time: apply saved tokens over env accounts."""
+    data = state._load_json(OVERRIDES_FILE, {})
+    n = 0
+    for key, tok in data.items():
+        m = key.match if False else None
+        if not key.startswith("GDrive_") or not key.endswith("_REFRESH_TOKEN"):
+            continue
+        name = key[len("GDrive_"):-len("_REFRESH_TOKEN")]
+        cid, csec = _client_pair(name)
+        if cid and csec:
+            config.DRIVE_ACCOUNTS[name] = {
+                "client_id": cid, "client_secret": csec, "refresh_token": tok,
+            }
+            n += 1
+    if n:
+        logger.info(f"datastore: {n} Telegram-registered drive account(s) loaded")
+
+
+@app.on_message(filters.command(["drivelogin", "addaccount"]) & AdminOnly)
+@guarded
+def cmd_drivelogin(client, message):
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        existing = ", ".join(sorted(config.DRIVE_ACCOUNTS)) or "none"
+        return message.reply_text(
+            "☁️ <b>Add a Drive account</b>\n\n"
+            f"1. Send: <code>/drivelogin &lt;name&gt;</code> (e.g. <code>/drivelogin work</code>)\n"
+            f"2. I'll give you a code + link — open it, sign in, type the code.\n\n"
+            f"Active accounts: <code>{esc(existing)}</code> • "
+            f"switch per chat in /settings.")
+    name = re.sub(r"[^a-z0-9_-]", "", parts[1].strip().lower())
+    if not name:
+        return message.reply_text("⚠️ Account name: letters/digits/-/_ only.")
+    cid, csec = _client_pair(name)
+    if not cid:
+        return message.reply_text(
+            "❌ No OAuth client credentials found. Add "
+            "<code>GDrive_" + esc(name) + "_CLIENT_ID/_CLIENT_SECRET</code> to `.env` "
+            "(or a shared <code>GCP_CLIENT_ID/GCP_CLIENT_SECRET</code>), then retry.")
+
+    status = message.reply_text("🔑 Requesting a device code from Google…")
+    import requests as rq
+    try:
+        r = rq.post("https://oauth2.googleapis.com/device/code", data={
+            "client_id": cid, "scope": SCOPES,
+        }, timeout=15)
+        d = r.json()
+    except Exception as e:
+        return safe_edit(client, message.chat.id, status.id, f"❌ {esc(e)}")
+    if "device_code" not in d:
+        return safe_edit(client, message.chat.id, status.id,
+                          f"❌ Google said: <code>{esc(str(d)[:200])}</code>")
+
+    _pending[message.chat.id] = {
+        "name": name, "device_code": d["device_code"],
+        "user_code": d.get("user_code", ""), "interval": int(d.get("interval", 5)),
+        "expires": time.time() + int(d.get("expires_in", 1800)),
+    }
+    safe_edit(
+        client, message.chat.id, status.id,
+        "☁️ <b>Add this Drive account</b>\n\n"
+        f"1️⃣ Open: {DEVICE_URL}\n"
+        f"2️⃣ Sign in with the Google account you want as <b>{esc(name)}</b>\n"
+        f"3️⃣ Enter code: <code>{d.get('user_code', '?')}</code>\n\n"
+        "I'll detect approval automatically (checking every few seconds).")
+
+    threading.Thread(target=_poll_approval, daemon=True).start()
+
+
+def _poll_approval(chat_id=None):
+    """Polls the token endpoint until approved/expired."""
+    chat_id = next(iter(_pending), None) if chat_id is None else chat_id
+    p = _pending.get(chat_id)
+    if not p:
+        return
+    cid, csec = _client_pair(p["name"])
+    while time.time() < p["expires"]:
+        time.sleep(p["interval"])
+        try:
+            import requests as rq
+            r = rq.post(TOKEN_URL, data={
+                "client_id": cid, "client_secret": csec,
+                "device_code": p["device_code"],
+                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+            }, timeout=15)
+            d = r.json()
+        except Exception as e:
+            logger.warning(f"drivelogin poll error: {e}")
+            continue
+        if "refresh_token" in d:
+            try:
+                _register_account(p["name"], d["refresh_token"])
+            except Exception as e:
+                logger.exception("drivelogin register failed")
+                app.send_message(chat_id, f"❌ Registered but failed to activate: <code>{esc(e)}</code>")
+                _pending.pop(chat_id, None)
+                return
+            app.send_message(
+                chat_id,
+                f"✅ Drive account <b>{esc(p['name'])}</b> added!\n"
+                f"Switch chats to it in /settings → ☁️ Drive account.")
+            _pending.pop(chat_id, None)
+            return
+        err = d.get("error")
+        if err == "authorization_pending":
+            continue
+        if err == "slow_down":
+            p["interval"] += 5
+            continue
+        app.send_message(chat_id, f"❌ Login failed: <code>{esc(err or str(d)[:200])}</code>")
+        _pending.pop(chat_id, None)
+        return
+    app.send_message(chat_id, "⏱️ Device code expired — run /drivelogin again.")
+
+
+@app.on_message(filters.command(["drivelist", "driveaccounts"]) & AdminOnly)
+@guarded
+def cmd_drivelist(client, message):
+    rows = []
+    for name, acct in sorted(config.DRIVE_ACCOUNTS.items()):
+        rows.append(f"• <code>{esc(name)}</code> — …{esc(acct['refresh_token'][-6:])}")
+    message.reply_text(
+        "☁️ <b>Registered Drive accounts</b>\n\n"
+        + ("\n".join(rows) if rows else "_none — use /drivelogin or .env_"))

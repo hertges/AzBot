@@ -61,7 +61,7 @@ def cmd_unzip(client, message):
     """Unpack archives: /unzipl → inner files to Telegram.
     /unzipm → accepted as an alias; inner files still go to this chat
     (mirroring an unpacked archive back to Drive would just duplicate it)."""
-    from .utils import URL_RE
+    from .utils import parse_payload
     links, rename, folder = parse_payload(message.text.split(maxsplit=1)[1]
                                           if len(message.text.split(maxsplit=1)) > 1 else "")
     reply = message.reply_to_message

@@ -155,7 +155,10 @@ class ShellSession:
 
     def _keyboard(self):
         return InlineKeyboardMarkup([[
+            InlineKeyboardButton("▲", callback_data="shup"),
             InlineKeyboardButton("⛔ Ctrl+C", callback_data="shctrlc"),
+            InlineKeyboardButton("▼", callback_data="shdown"),
+        ], [
             InlineKeyboardButton("⏹ Exit shell", callback_data="shexit"),
         ]])
 
@@ -226,6 +229,29 @@ class ShellSession:
             except Exception:
                 pass
         return True
+
+    def history_nav(self, direction):
+        """▲ recalls the previous command into the line editor (like pressing
+        the Up arrow); ▼ moves back down. Sent as raw terminal escape codes
+        over the PTY so bash's real readline handles them."""
+        if self.exited or self.closed:
+            return False
+        self.last_activity = time.time()
+        try:
+            os.write(self.master, b"\x1b[A" if direction == "up" else b"\x1b[B")
+            return True
+        except OSError:
+            return False
+
+    def cursor(self, direction):
+        """◀ ▶ move the caret within the current input line."""
+        if self.exited or self.closed:
+            return False
+        try:
+            os.write(self.master, b"\x1b[D" if direction == "left" else b"\x1b[C")
+            return True
+        except OSError:
+            return False
 
     def stop(self, reason=""):
         if self.closed:
@@ -343,6 +369,30 @@ def register_shell_handlers(app, AdminOnly, guarded, on_one_shot):
             return cq.answer("No live shell.", show_alert=True)
         sess.ctrl_c()
         cq.answer("⛔ Ctrl+C sent")
+
+    @app.on_callback_query(filters.regex(r"^shup$"))
+    @guarded
+    def sh_up_cb(client, cq):
+        if not _is_admin_user(cq.from_user.id):
+            return cq.answer("Admin only.", show_alert=True)
+        with _sess_lock:
+            sess = SESSIONS.get(cq.message.chat.id)
+        if not sess:
+            return cq.answer("No live shell.", show_alert=True)
+        sess.history_nav("up")
+        cq.answer("▲ previous command")
+
+    @app.on_callback_query(filters.regex(r"^shdown$"))
+    @guarded
+    def sh_down_cb(client, cq):
+        if not _is_admin_user(cq.from_user.id):
+            return cq.answer("Admin only.", show_alert=True)
+        with _sess_lock:
+            sess = SESSIONS.get(cq.message.chat.id)
+        if not sess:
+            return cq.answer("No live shell.", show_alert=True)
+        sess.history_nav("down")
+        cq.answer("▼ next command")
 
     @app.on_callback_query(filters.regex(r"^shexit$"))
     @guarded

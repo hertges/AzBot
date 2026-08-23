@@ -60,6 +60,7 @@ def queue_subprocess_job(client, message, cmd, url, dest="telegram", zip_output=
     if not state.ensure_free(config.MIN_FREE_MB):
         return message.reply_text("❌ Disk full, try again later.")
     task_id = new_task_id()
+    task_dir = os.path.join(config.DOWNLOAD_DIR, task_id)
     tag = f"📦→{config.DEST_LABEL[dest]}" if zip_output else f"→{config.DEST_LABEL[dest]}"
     status = message.reply_text(
         f"⚡ Queued <code>/{esc(cmd)}</code> {tag} — <code>{esc(task_id)}</code>",
@@ -116,29 +117,32 @@ def run_subprocess_job(client, chat_id, msg_id, cmd, url, task_id, reply_to, des
         threading.Thread(target=_watchdog, daemon=True).start()
 
         last_edit = 0.0
-        for line in iter(proc.stdout.readline, ""):
-            last_activity[0] = time.time()
-            if state.is_cancelled(task_id):
-                break
-            full_log.append(line.rstrip())
-            now = time.time()
-            if now - last_edit < 3:
-                continue
-            last_edit = now
-            m = ARIA2_PROGRESS_RE.search(line)
-            if m and cmd == "torrent":
-                done, total, pct, spd = m.groups()
-                eta_m = ETA_RE.search(line)
-                eta = eta_m.group(1) if eta_m else "?"
-                throttled_edit(client, chat_id, msg_id,
-                                f"⬇️ Torrent\n{bar(float(pct), 100)}\n<code>{esc(done)}/{esc(total)}</code> • {esc(spd)}/s • ETA {esc(eta)}",
-                                markup=cancel_kb(task_id))
-            elif cmd == "gallery" and any(k in line for k in ("Downloading", "Skip", "error")):
-                throttled_edit(client, chat_id, msg_id, f"🖼️ gallery-dl\n<code>{esc(line.strip()[:120])}</code>",
-                                markup=cancel_kb(task_id))
-            elif cmd == "clone":
-                throttled_edit(client, chat_id, msg_id, f"🌐 Mirroring…\n<code>{esc(line.strip()[:120])}</code>",
-                                markup=cancel_kb(task_id))
+        try:
+            for line in iter(proc.stdout.readline, ""):
+                last_activity[0] = time.time()
+                if state.is_cancelled(task_id):
+                    break
+                full_log.append(line.rstrip())
+                now = time.time()
+                if now - last_edit < 3:
+                    continue
+                last_edit = now
+                m = ARIA2_PROGRESS_RE.search(line)
+                if m and cmd == "torrent":
+                    done, total, pct, spd = m.groups()
+                    eta_m = ETA_RE.search(line)
+                    eta = eta_m.group(1) if eta_m else "?"
+                    throttled_edit(client, chat_id, msg_id,
+                                    f"⬇️ Torrent\n{bar(float(pct), 100)}\n<code>{esc(done)}/{esc(total)}</code> • {esc(spd)}/s • ETA {esc(eta)}",
+                                    markup=cancel_kb(task_id))
+                elif cmd == "gallery" and any(k in line for k in ("Downloading", "Skip", "error")):
+                    throttled_edit(client, chat_id, msg_id, f"🖼️ gallery-dl\n<code>{esc(line.strip()[:120])}</code>",
+                                    markup=cancel_kb(task_id))
+                elif cmd == "clone":
+                    throttled_edit(client, chat_id, msg_id, f"🌐 Mirroring…\n<code>{esc(line.strip()[:120])}</code>",
+                                    markup=cancel_kb(task_id))
+        except (AttributeError, ValueError):
+            pass  # stdout closed by /cancel teardown — expected
 
         proc.wait()
         logger.info(f"[{task_id}] /{cmd} process exited with code {proc.returncode}")

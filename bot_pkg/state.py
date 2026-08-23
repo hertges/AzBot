@@ -103,16 +103,14 @@ def set_drive_account(chat_id, name):
     reset_drive_nav(chat_id)
     return True
 
-# ── Instagram index ledger (local, per chat / user / type) ──────────────
-# One SQLite-free flat file per (chat, username, type) under
-# data/indexes/<chat>/ — gallery-dl's --download-archive format (one id per
-# line). Local by design: nothing Instagram-related spreads into the user's
-# Drive. /igindex manages and deletes them.
+# ── Instagram index ledger (flat, per user / type) ──────────────────────
+# One file per (username, type) under data/indexes/ — gallery-dl's
+# --download-archive format (one id per line). Shared across chats on
+# purpose: one archive of @user serves everyone. /igindex manages them.
 def index_path(chat_id, username, archive_type):
-    d = os.path.join(config.INDEX_DIR, str(chat_id))
-    os.makedirs(d, exist_ok=True)
+    os.makedirs(config.INDEX_DIR, exist_ok=True)
     safe_u = re.sub(r"[^A-Za-z0-9._-]", "_", username)
-    return os.path.join(d, f"{safe_u}.{archive_type}.txt")
+    return os.path.join(config.INDEX_DIR, f"{safe_u}.{archive_type}.txt")
 
 def ig_index_exists(chat_id, username, archive_type):
     p = index_path(chat_id, username, archive_type)
@@ -127,24 +125,22 @@ def ig_index_exists(chat_id, username, archive_type):
         pass
     return False
 
-def list_ig_indexes(chat_id):
-    """[(username, type), ...] found for this chat."""
-    d = os.path.join(config.INDEX_DIR, str(chat_id))
+def list_ig_indexes():
+    """[(username, type), ...] found on the bot."""
     out = []
-    if os.path.isdir(d):
-        for f in sorted(os.listdir(d)):
+    if os.path.isdir(config.INDEX_DIR):
+        for f in sorted(os.listdir(config.INDEX_DIR)):
             m = re.match(r"^(.+)\.(posts|reels|stories|highlights|tagged)\.txt$", f)
-            if m and os.path.getsize(os.path.join(d, f)) >= 0:
+            if m:
                 out.append((m.group(1), m.group(2)))
     return out
 
-def delete_ig_index(chat_id, username=None, archive_type=None):
+def delete_ig_index(username=None, archive_type=None):
     """Deletes matching ledgers (local + Drive mirror). All args None → wipe
-    every index for the chat. Returns count deleted."""
-    d = os.path.join(config.INDEX_DIR, str(chat_id))
+    every index. Returns count deleted."""
     removed = []
-    if os.path.isdir(d):
-        for f in os.listdir(d):
+    if os.path.isdir(config.INDEX_DIR):
+        for f in os.listdir(config.INDEX_DIR):
             m = re.match(r"^(.+)\.(posts|reels|stories|highlights|tagged)\.txt$", f)
             if not m:
                 continue
@@ -154,7 +150,7 @@ def delete_ig_index(chat_id, username=None, archive_type=None):
             if archive_type and t != archive_type:
                 continue
             try:
-                os.remove(os.path.join(d, f))
+                os.remove(os.path.join(config.INDEX_DIR, f))
                 removed.append(f)
             except OSError:
                 pass
@@ -162,11 +158,11 @@ def delete_ig_index(chat_id, username=None, archive_type=None):
     try:
         from . import datastore
         for f in removed:
-            datastore.delete_remote_index(chat_id, f)
+            datastore.delete_remote_index(None, f)
     except Exception:
         pass
     for f in removed:
-        logger.info(f"ig index deleted: {chat_id}/{f}")
+        logger.info(f"ig index deleted: {f}")
     return len(removed)
 
 def cookie_path(name="global"):
@@ -305,6 +301,23 @@ class QualityExtra:
     @classmethod
     def take(cls, token):
         return cls._extra.pop(token, {"rename": None, "folder": None})
+
+# Retry tokens for failed quality probes ("🔄 Retry" button)
+_retry_tokens = {}
+
+def new_retry_token(url, dest, zip_output, rename, folder):
+    token = uuid.uuid4().hex[:10]
+    _retry_tokens[token] = {
+        "url": url, "dest": dest, "zip_output": zip_output,
+        "rename": rename, "folder": folder, "ts": time.time(),
+    }
+    return token
+
+def pop_retry_token(token):
+    t = _retry_tokens.pop(token, None)
+    if t and time.time() - t["ts"] > 900:
+        return None
+    return t
 
 # ── Pending /ig multi-select archive-type sessions ──────────────────────
 _ig_picker_sessions = {}

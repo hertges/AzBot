@@ -470,12 +470,30 @@ def show_quality_picker(client, message, url, dest, zip_output, rename=None, fol
     try:
         title, options = engine.probe_qualities(url, message.chat.id)
     except Exception as e:
+        # Tell the user WHY there's no picker instead of silently grabbing
+        # a low-quality merged format (the "360p with black thumbnail"
+        # report = probe failed and auto-best ran with a degraded format
+        # list). yt-dlp is auto-updated every 6h, so most of these are
+        # transient extraction walls — the retry button helps.
         logger.warning(f"quality probe failed for {url}: {e}")
-        client.edit_message_text(message.chat.id, status.id,
-                                  "ℹ️ Couldn't list qualities — downloading with auto-best instead.")
-        return dispatch_link(client, message, url, dest, zip_output=zip_output,
-                              rename=rename, folder=folder)
+        from pyrogram.types import InlineKeyboardMarkup as _IKM, InlineKeyboardButton as _IKB
+        kb = _IKM([[_IKB("🔄 Retry", callback_data=f"ytretry:{state.new_retry_token(url, dest, zip_output, rename, folder)}")]])
+        client.edit_message_text(
+            message.chat.id, status.id,
+            f"⚠️ Couldn't read this video's formats ({esc(str(e)[:140])}).\n"
+            f"You can retry, or I'll download best-available directly:",
+            reply_markup=kb,
+        )
+        return
+    try:
+        _do_picker(client, message, status.id, url, dest, zip_output, rename, folder, title, options)
+    except Exception:
+        logger.exception("picker render failed")
+        dispatch_link(client, message, url, dest, zip_output=zip_output,
+                      rename=rename, folder=folder)
 
+
+def _do_picker(client, message, status_id, url, dest, zip_output, rename, folder, title, options):
     token = state.new_quality_session(url, dest, zip_output, message.id)
     state.QualityExtra.save(token, rename=rename, folder=folder)
     rows, row = [], []
@@ -485,10 +503,11 @@ def show_quality_picker(client, message, url, dest, zip_output, rename=None, fol
             rows.append(row); row = []
     if row:
         rows.append(row)
-    rows.append([InlineKeyboardButton("❌ Cancel", callback_data=f"ytqcancel:{token}")])
+    rows.append([InlineKeyboardButton("⬇️ Best (skip menu)", callback_data=f"ytq:{token}:bv*+ba/b"),
+                 InlineKeyboardButton("❌ Cancel", callback_data=f"ytqcancel:{token}")])
 
     client.edit_message_text(
-        message.chat.id, status.id,
+        message.chat.id, status_id,
         f"🎬 <b>{esc(title[:80])}</b>\n\nPick a quality:",
         reply_markup=InlineKeyboardMarkup(rows),
     )
@@ -522,6 +541,26 @@ def cb_quality_cancel(client, cq):
     state.pop_quality_session(token)
     safe_edit(cq, "Cancelled.")
     cq.answer()
+
+
+@app.on_callback_query(filters.regex(r"^ytretry:"))
+@guarded
+def cb_quality_retry(client, cq):
+    token = cq.data.split(":", 1)[1]
+    t = state.pop_retry_token(token)
+    if not t:
+        return cq.answer("Expired — send the link again.", show_alert=True)
+    cq.answer("Retrying…")
+    safe_edit(cq, "🔎 Checking available qualities… (retry)")
+    # Re-run the picker with a FRESH probe; yt-dlp may have recovered.
+    try:
+        title, options = engine.probe_qualities(t["url"], cq.message.chat.id)
+        _do_picker(client, cq.message, cq.message.id, t["url"], t["dest"],
+                   t["zip_output"], t["rename"], t["folder"], title, options)
+    except Exception as e:
+        logger.warning(f"retry probe still failing for {t['url']}: {e}")
+        dispatch_link(client, cq.message, t["url"], t["dest"],
+                      zip_output=t["zip_output"], rename=t["rename"], folder=t["folder"])
 
 
 def queue_telegram_media_job(client, message, media_msg, dest, zip_output=False):

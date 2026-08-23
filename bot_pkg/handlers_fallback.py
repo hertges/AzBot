@@ -8,16 +8,17 @@ from .handlers_shell import SHELL_COMMAND_NAMES
 
 logger = log.get(__name__)
 
-ADMIN_COMMANDS = ["allow", "ban", "cancelall", "ca", "updateyt", "ytupdate", "shc", "shexit", "shq"]
 KNOWN_COMMANDS = [
     "start", "help", "m", "l", "zm", "zl", "yt", "y", "ytdl", "ytdlleech", "yl",
     "ig", "igindex", "igindexes",
     "torrent", "gallery", "clone",
     "zipl", "zipm", "unzipl", "unzipm",
-    "cookie", "settings", "drive", "drivesearch",
+    "cookie", "settings", "drive", "drivesearch", "drivelist", "driveaccounts",
     "stats", "clean", "cancel", "cancelall", "ca", "sh", "shell", "shc", "shexit", "shq",
     "allow", "ban", "updateyt", "ytupdate",
 ]
+ADMIN_COMMANDS = ["allow", "ban", "cancelall", "ca", "updateyt", "ytupdate",
+                  "shc", "shexit", "shq", "drivelogin", "addaccount"]
 
 # These only ever run *after* every real command handler above has had its
 # shot (Pyrogram tries handlers in registration order within a group and

@@ -107,9 +107,13 @@ def _ydl_base_opts(chat_id, outtmpl):
         # not something a cookie fixes on its own. The standard workaround
         # (what WZML-X and most current mirror-bots do) is skipping the
         # broken web client and using clients that don't need a PO token.
-        # tv/android are the most reliable as of yt-dlp 2026.x; web stays
-        # as a last-resort fallback.
-        "extractor_args": {"youtube": {"player_client": ["tv", "android", "web"]}},
+        # tv/android/ios are the most reliable as of yt-dlp 2026.x; web is
+        # last-resort. A degraded client list is what produces the
+        # "only 360p with black thumbnail" symptom.
+        "extractor_args": {"youtube": {"player_client": ["tv", "android", "ios", "web"]}},
+        # Black thumbnails: some clients return storyboards instead of real
+        # thumbs. Prefer an embedded thumbnail when converting.
+        "postprocessors": [{"key": "FFmpegMetadata", "add_metadata": True}],
     }
     ck = state.active_cookie_file(chat_id)
     if ck:
@@ -393,19 +397,24 @@ def download_direct(url, chat_id, msg_id, task_id, client, dest_dir):
     state.attach_proc(task_id, proc)
 
     last_edit = 0.0
-    for line in iter(proc.stdout.readline, ""):
-        if state.is_cancelled(task_id):
-            break
-        now = time.time()
-        if now - last_edit < 1.5:
-            continue
-        m = ARIA2_PROGRESS_RE.search(line)
-        if not m:
-            continue
-        last_edit = now
-        done, total, pct, spd = m.groups()
-        text = f"⬇️ Downloading…\n{bar(float(pct), 100)}\n`{done}/{total}` • {spd}/s"
-        throttled_edit(client, chat_id, msg_id, text, markup=cancel_kb(task_id))
+    try:
+        for line in iter(proc.stdout.readline, ""):
+            if state.is_cancelled(task_id):
+                break
+            now = time.time()
+            if now - last_edit < 1.5:
+                continue
+            m = ARIA2_PROGRESS_RE.search(line)
+            if not m:
+                continue
+            last_edit = now
+            done, total, pct, spd = m.groups()
+            text = f"⬇️ Downloading…\n{bar(float(pct), 100)}\n`{done}/{total}` • {spd}/s"
+            throttled_edit(client, chat_id, msg_id, text, markup=cancel_kb(task_id))
+    except (AttributeError, ValueError):
+        # stdout can be None/closed when the process was just terminated
+        # by /cancel — that's expected teardown, not an error.
+        pass
 
     proc.wait()
     if state.is_cancelled(task_id):

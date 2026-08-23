@@ -84,6 +84,21 @@ def _send_one(client, chat_id, fpath, msg_id, caption=None, reply_to=None, task_
             logger.warning(f"FloodWait {e.value}s while sending {fpath}")
             time.sleep(e.value + 1)
         except Exception as e:
+            name = type(e).__name__
+            # PHOTO_INVALID_DIMENSIONS (and friends) mean Telegram refuses
+            # this image as a photo — usually extreme dimensions or an odd
+            # aspect ratio from web-scraped images. Retry ONCE as a plain
+            # document, which always works and preserves the file exactly.
+            if ext in PHOTO_EXT and attempt == 0 and (
+                    "PHOTO_INVALID_DIMENSIONS" in str(e) or
+                    "PHOTO_EXT" in name or "Invalid" in name or "Dimensions" in name):
+                logger.warning(f"{name} for {fpath} — falling back to document")
+                try:
+                    r = client.send_document(document=fpath, **kwargs)
+                    logger.info(f"uploaded as document after photo-dimension error: {fpath}")
+                    return r
+                except Exception as e2:
+                    raise e2 if attempt == 2 else e
             logger.warning(f"send attempt {attempt + 1}/3 failed for {fpath}: {e}")
             if attempt == 2:
                 raise

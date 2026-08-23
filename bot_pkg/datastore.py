@@ -128,7 +128,8 @@ def _download(remote_name, folder_id, local_path):
 
 def push_index(chat_id, username, archive_type):
     """Mirror the local index ledger up to Drive (fire-and-forget friendly;
-    cheap enough to call inline too)."""
+    cheap enough to call inline too). chat_id is unused (flat index space)
+    but kept in the signature for compatibility."""
     p = None
     try:
         from . import state as _state
@@ -137,8 +138,7 @@ def push_index(chat_id, username, archive_type):
         return False
     if not p or not os.path.exists(p):
         return False
-    safe_u = os.path.basename(p).rsplit(".", 2)[0]
-    rel = f"indexes/{chat_id}/{os.path.basename(p)}"
+    rel = f"indexes/{os.path.basename(p)}"
     return _upload(p, rel)
 
 
@@ -147,21 +147,21 @@ def pull_index(chat_id, username, archive_type, local_path):
     Returns True if a remote copy was pulled."""
     if os.path.exists(local_path):
         return False
-    folder = _ensure_path(f"indexes/{chat_id}")
+    folder = _ensure_path("indexes")
     if not folder:
         return False
     ok = _download(os.path.basename(local_path), folder, local_path)
     if ok:
-        logger.info(f"datastore: pulled index {chat_id}/{username}.{archive_type}")
+        logger.info(f"datastore: pulled index {username}.{archive_type}")
     return ok
 
 
 def delete_remote_index(chat_id, basename):
-    """Best-effort removal of indexes/<chat>/<basename> from Drive."""
+    """Best-effort removal of indexes/<basename> from Drive."""
     try:
         from . import drive
         srv = drive.get_service(_account())
-        folder = _ensure_path(f"indexes/{chat_id}")
+        folder = _ensure_path("indexes")
         if not srv or not folder:
             return False
         safe = basename.replace("'", "\\'")
