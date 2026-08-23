@@ -64,9 +64,12 @@ SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
 USERS_FILE    = os.path.join(DATA_DIR, "users.json")
 COOKIES_DIR   = os.path.join(DATA_DIR, "cookies")
 os.makedirs(COOKIES_DIR, exist_ok=True)
-# Per-user, per-type Instagram index ledgers (data/indexes/<chat>/<user>.<type>.txt)
+# Per-user, per-type Instagram index ledgers (data/indexes/<user>.<type>.txt)
 INDEX_DIR     = os.path.join(DATA_DIR, "indexes")
 os.makedirs(INDEX_DIR, exist_ok=True)
+# Custom per-chat upload thumbnails (WZML-X /setthumb parity)
+THUMBS_DIR    = os.path.join(DATA_DIR, "thumbs")
+os.makedirs(THUMBS_DIR, exist_ok=True)
 
 MIN_FREE_MB = 300
 

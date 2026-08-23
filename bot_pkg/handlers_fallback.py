@@ -10,7 +10,7 @@ logger = log.get(__name__)
 
 KNOWN_COMMANDS = [
     "start", "help", "m", "l", "zm", "zl", "yt", "y", "ytdl", "ytdlleech", "yl",
-    "ig", "igm", "igl", "igindex", "igindexes",
+    "ig", "igm", "igl", "igindex", "igindexes", "setthumb", "removethumb",
     "torrent", "gallery", "clone",
     "zipl", "zipm", "unzipl", "unzipm",
     "cookie", "settings", "drive", "drivesearch", "drivelist", "driveaccounts",

@@ -123,6 +123,9 @@ def start():
         pulled = datastore.restore_all_local()
         if pulled:
             logger.info(f"datastore: restored {', '.join(pulled)}")
+        n_thumbs = state.restore_thumbs()
+        if n_thumbs:
+            logger.info(f"datastore: restored {n_thumbs} custom thumbnail(s)")
         import importlib
         importlib.reload(state)
     except Exception as e:

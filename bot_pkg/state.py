@@ -215,6 +215,86 @@ def restore_cookies():
         logger.warning(f"cookie restore skipped: {e}")
     return n
 
+# ── Custom thumbnails (WZML-X /setthumb parity) ──────────────────────────
+def thumb_path(chat_id):
+    os.makedirs(config.THUMBS_DIR, exist_ok=True)
+    return os.path.join(config.THUMBS_DIR, f"{chat_id}.jpg")
+
+def get_thumb(chat_id):
+    p = thumb_path(chat_id)
+    return p if os.path.exists(p) else None
+
+def set_thumb(chat_id, src_image):
+    """Normalizes any incoming image to a ≤320px JPEG thumbnail and mirrors
+    it to the Drive datastore. Returns the stored path."""
+    import subprocess
+    dst = thumb_path(chat_id)
+    try:
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", src_image,
+                        "-vf", "scale='min(320,iw)':-2", "-frames:v", "1", dst],
+                       capture_output=True, timeout=30, check=True)
+    except Exception:
+        # not an image ffmpeg can decode — copy as-is only if it's jpg-sized
+        shutil.copyfile(src_image, dst)
+    try:
+        from . import datastore
+        import threading as _th
+        _th.Thread(target=datastore.push_datafile,
+                   args=(dst, f"thumbs/{os.path.basename(dst)}"), daemon=True).start()
+    except Exception:
+        pass
+    logger.info(f"custom thumb set for chat {chat_id}")
+    return dst
+
+def delete_thumb(chat_id):
+    p = thumb_path(chat_id)
+    removed = False
+    if os.path.exists(p):
+        os.remove(p)
+        removed = True
+    try:
+        from . import datastore
+        import threading as _th
+        _th.Thread(target=datastore.delete_remote_datafile,
+                   args=(f"thumbs/{os.path.basename(p)}",), daemon=True).start()
+    except Exception:
+        pass
+    return removed
+
+def restore_thumbs():
+    """Boot-time: pull every custom thumb missing locally."""
+    n = 0
+    try:
+        from . import datastore
+        os.makedirs(config.THUMBS_DIR, exist_ok=True)
+        for fname in datastore.list_remote_files("thumbs"):
+            local = os.path.join(config.THUMBS_DIR, fname)
+            if not os.path.exists(local) and datastore.pull_datafile(f"thumbs/{fname}", local):
+                n += 1
+    except Exception as e:
+        logger.warning(f"thumb restore skipped: {e}")
+    return n
+
+# ── Duplicate-task guard (WZML-X parity: same link ≠ second download) ────
+ACTIVE_URLS = {}          # normalized url -> task_id
+_urls_lock = threading.Lock()
+
+def register_url(url, task_id):
+    key = url.strip()
+    with _urls_lock:
+        ACTIVE_URLS[key] = task_id
+
+def find_active_url(url):
+    with _urls_lock:
+        tid = ACTIVE_URLS.get(url.strip())
+    return tid
+
+def drop_url_by_task(task_id):
+    with _urls_lock:
+        for k, v in list(ACTIVE_URLS.items()):
+            if v == task_id:
+                del ACTIVE_URLS[k]
+
 def list_cookie_profiles():
     return [os.path.splitext(f)[0] for f in os.listdir(config.COOKIES_DIR) if f.endswith(".txt")]
 

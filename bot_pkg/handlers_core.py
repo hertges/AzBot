@@ -60,8 +60,9 @@ def render_help(chat_id, msg_id=None):
         [InlineKeyboardButton("⬇️ Downloads", callback_data="help:dl"),
          InlineKeyboardButton("🗃 Zip", callback_data="help:zip")],
         [InlineKeyboardButton("📷 Instagram", callback_data="help:ig"),
-         InlineKeyboardButton("🍪 Cookies", callback_data="help:cookies")],
-        [InlineKeyboardButton("🔧 Admin", callback_data="help:admin")],
+         InlineKeyboardButton("🖼 Thumbs", callback_data="help:misc")],
+        [InlineKeyboardButton("🍪 Cookies", callback_data="help:cookies"),
+         InlineKeyboardButton("🔧 Admin", callback_data="help:admin")],
     ])
     text = (
         "👋 <b>AzLeechBot</b>\n\n"
@@ -111,6 +112,12 @@ HELP = {
            "<code>/igindex</code> — view + delete indexes per user or per type. "
            "Deleting an index makes the next run re-fetch everything.\n\n"
            "Stories &amp; Highlights need a logged-in cookie profile (<code>/cookie</code>)."),
+    "misc": ("🖼 <b>Thumbnails</b>\n\n"
+             "<code>/setthumb</code> — send/reply to an image: it becomes the "
+             "thumbnail on all your video/audio uploads in this chat (fixes black "
+             "thumbnails). <code>/removethumb</code> clears it. Mirrored to Drive.\n\n"
+             "♻️ <b>Duplicate guard</b>: sending the exact same link while it's still "
+             "downloading is rejected instead of downloading it twice."),
     "zip": ("🗃 <b>Zip leech / mirror</b>\n\n"
             "<code>/zipl</code> — gather files into ONE archive, sent to this chat:\n"
             "• reply to a file → zip it\n"
@@ -510,6 +517,13 @@ def cmd_mirror_leech(client, message):
     # Batch: one job per link; rename only applies to a single link.
     for i, url in enumerate(links):
         r = rename if len(links) == 1 else None
+        # WZML-X parity: reject a second download of the SAME url while one
+        # is still active (prevents double-leeched duplicates).
+        active = state.find_active_url(url)
+        if active and active in state.ACTIVE_JOBS:
+            return message.reply_text(
+                f"⚠️ This exact link is already being downloaded (<code>{esc(active)}</code>). "
+                f"Use /cancel {esc(active)} first if you really want it again.")
         _dispatch_one(client, message, cmd, url, dest, zip_output, r, folder)
 
 
@@ -815,7 +829,44 @@ def run_telegram_media_job(client, chat_id, msg_id, media_msg, task_id, reply_to
         throttled_edit(client, chat_id, msg_id, f"❌ Failed: <code>{esc(str(e)[:300])}</code>", force=True)
     finally:
         state.drop_job(task_id)
+        state.drop_url_by_task(task_id)
         shutil.rmtree(task_dir, ignore_errors=True)
+
+
+# ── /setthumb — custom upload thumbnail (WZML-X parity) ──────────────────
+@app.on_message(filters.command(["setthumb", "removethumb"]) & Authorized)
+@guarded
+def cmd_setthumb(client, message):
+    if message.command[0] == "removethumb":
+        removed = state.delete_thumb(message.chat.id)
+        return message.reply_text("🗑 Custom thumbnail removed." if removed
+                                   else "ℹ️ No custom thumbnail was set.")
+
+    reply = message.reply_to_message
+    photo_msg = None
+    if reply and (reply.photo or (reply.document and
+                   (reply.document.mime_type or "").startswith("image/"))):
+        photo_msg = reply
+    elif message.photo or (message.document and
+                           (message.document.mime_type or "").startswith("image/")):
+        photo_msg = message
+
+    if not photo_msg:
+        return message.reply_text(
+            "🖼 Send an image **as a photo or file**, or reply to one, with "
+            "<code>/setthumb</code> — it becomes the thumbnail for all your "
+            "video/audio uploads in this chat.\n<code>/removethumb</code> clears it.")
+    path = client.download_media(photo_msg, file_name=state.thumb_path(message.chat.id) + ".in")
+    if not path:
+        return message.reply_text("❌ Couldn't download that image.")
+    state.set_thumb(message.chat.id, path)
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    message.reply_text(
+        "✅ Thumbnail set for this chat (used on video/audio uploads).\n"
+        "☁️ Mirrored to Drive: <code>AzBotData/thumbs/" + str(message.chat.id) + ".jpg</code>")
 
 
 GDRIVE_RE = re.compile(
@@ -1016,6 +1067,7 @@ def queue_leech_job(client, message, url, dest, zip_output=False, format_selecto
     status = message.reply_text(f"🔎 Queued{tag} — <code>{esc(task_id)}</code>", reply_markup=cancel_kb(task_id))
     task_dir = os.path.join(config.DOWNLOAD_DIR, task_id)
     state.register_job(task_id, message.chat.id, status.id, "yt-dlp", task_dir)
+    state.register_url(url, task_id)
     state.task_queue.put((run_leech_job,
                            (client, message.chat.id, status.id, url, task_id, message.id, dest,
                             zip_output, format_selector, rename, folder)))

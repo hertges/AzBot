@@ -1,4 +1,4 @@
-import os, time
+import os, time, shutil
 
 from pyrogram.errors import FloodWait
 from pyrogram.enums import ParseMode
@@ -75,6 +75,7 @@ def _send_one(client, chat_id, fpath, msg_id, caption=None, reply_to=None, task_
     duration = int(meta.get("duration") or 0) or None
     width = int(meta.get("width") or 0) or None
     height = int(meta.get("height") or 0) or None
+    thumb = state.get_thumb(chat_id)   # custom /setthumb image if the user set one
     for attempt in range(3):
         try:
             as_doc = state.get_as_document(chat_id)
@@ -82,9 +83,11 @@ def _send_one(client, chat_id, fpath, msg_id, caption=None, reply_to=None, task_
                 r = client.send_document(document=fpath, **kwargs)
             elif ext in VIDEO_EXT:
                 r = client.send_video(video=fpath, supports_streaming=True,
-                                       duration=duration, width=width, height=height, **kwargs)
+                                       duration=duration, width=width, height=height,
+                                       thumb=thumb, **kwargs)
             elif ext in AUDIO_EXT:
-                r = client.send_audio(audio=fpath, duration=duration, performer="AzLeechBot", **kwargs)
+                r = client.send_audio(audio=fpath, duration=duration, performer="AzLeechBot",
+                                       thumb=thumb, **kwargs)
             elif ext in PHOTO_EXT:
                 r = client.send_photo(photo=fpath, **kwargs)
             elif ext == ".webp":
@@ -126,12 +129,18 @@ def _send_one(client, chat_id, fpath, msg_id, caption=None, reply_to=None, task_
             time.sleep(2)
 
 def upload_to_telegram(client, chat_id, fpath, msg_id, reply_to=None, task_id=None, video_meta=None):
-    """Uploads fpath natively over MTProto (Pyrogram), splitting only if it
-    exceeds Telegram's absolute per-file cap for bots (~2GB)."""
+    """Uploads fpath natively over MTProto (Pyrogram). Files above Telegram's
+    ~2GB cap are split — WZML-X style: VIDEOS get ffmpeg-segmented into
+    playable parts (each with correct duration/metadata), everything else is
+    byte-split. Parts are uploaded and deleted one by one (low RAM/disk)."""
     size = os.path.getsize(fpath)
     if size <= config.TG_MAX_FILE_BYTES:
         return [_send_one(client, chat_id, fpath, msg_id, reply_to=reply_to, task_id=task_id,
                           video_meta=video_meta)]
+
+    ext = os.path.splitext(fpath)[1].lower()
+    if ext in VIDEO_EXT and shutil.which("ffmpeg"):
+        return _split_upload_video(client, chat_id, fpath, msg_id, reply_to, task_id)
 
     logger.info(f"{fpath} is {fmtsz(size)}, splitting for upload")
     throttled_edit(client, chat_id, msg_id,
@@ -143,10 +152,84 @@ def upload_to_telegram(client, chat_id, fpath, msg_id, reply_to=None, task_id=No
     total = len(parts)
     for i, p in enumerate(parts, 1):
         if task_id and state.is_cancelled(task_id):
-            os.remove(p)
+            _cleanup(p)
             raise CancelledError("upload cancelled by user")
         caption = f"{_clean_caption(fpath)}.part{i:03d}/{total:03d}"
         results.append(_send_one(client, chat_id, p, msg_id, caption=caption, reply_to=reply_to,
                                  task_id=task_id))
-        os.remove(p)
+        _cleanup(p)   # delete each part right after its upload
+    try:
+        os.remove(fpath)
+    except OSError:
+        pass
     return results
+
+
+def _split_upload_video(client, chat_id, fpath, msg_id, reply_to, task_id):
+    """WZML-X parity: split a >2GB VIDEO with ffmpeg stream-copy into
+    equal-duration segments that remain playable files with real metadata
+    (not raw byte slices). Each segment uploads then deletes immediately."""
+    import subprocess as sp
+    meta = engine_probe_meta(fpath)
+    duration = float(meta.get("duration") or 0)
+    if duration <= 0:
+        # can't determine duration — fall back to byte split
+        parts = split_file(fpath, config.TG_MAX_FILE_BYTES)
+        total = len(parts)
+        out = []
+        for i, p in enumerate(parts, 1):
+            caption = f"{_clean_caption(fpath)}.part{i:03d}/{total:03d}"
+            out.append(_send_one(client, chat_id, p, msg_id, caption=caption,
+                                 reply_to=reply_to, task_id=task_id))
+            _cleanup(p)
+        try:
+            os.remove(fpath)
+        except OSError:
+            pass
+        return out
+
+    n_parts = -(-os.path.getsize(fpath) // config.TG_MAX_FILE_BYTES)   # ceil
+    seg_len = duration / n_parts
+    base = os.path.splitext(fpath)[0]
+    ext = os.path.splitext(fpath)[1] or ".mp4"
+    total = n_parts
+    results = []
+    throttled_edit(client, chat_id, msg_id,
+                    f"✂️ Video is {fmtsz(os.path.getsize(fpath))} — segmenting into "
+                    f"{total} playable parts…", force=True)
+    vmeta = {"duration": int(seg_len), "width": int(meta.get("width") or 0),
+             "height": int(meta.get("height") or 0)}
+    for i in range(1, total + 1):
+        if task_id and state.is_cancelled(task_id):
+            raise CancelledError("upload cancelled by user")
+        start = (i - 1) * seg_len
+        part = f"{base}.part{i:03d}{ext}"
+        args = ["ffmpeg", "-y", "-loglevel", "error",
+                "-ss", f"{start:.3f}", "-i", fpath, "-t", f"{seg_len:.3f}",
+                "-map", "0", "-c", "copy", "-movflags", "+faststart", part]
+        r = sp.run(args, capture_output=True, text=True, timeout=1800)
+        if r.returncode != 0 or not os.path.exists(part) or os.path.getsize(part) == 0:
+            logger.warning(f"segment {i} failed: {r.stderr[-200:] if r.stderr else 'empty'}")
+            continue
+        caption = f"{_clean_caption(fpath)}.part{i:03d}/{total:03d}"
+        results.append(_send_one(client, chat_id, part, msg_id, caption=caption,
+                                 reply_to=reply_to, task_id=task_id, video_meta=vmeta))
+        _cleanup(part)   # delete right after upload — our own rule
+    try:
+        os.remove(fpath)
+    except OSError:
+        pass
+    return results
+
+
+def engine_probe_meta(fpath):
+    """Lazy import to avoid a circular import at module load."""
+    from . import engine
+    return engine.probe_video_meta(fpath)
+
+
+def _cleanup(p):
+    try:
+        os.remove(p)
+    except OSError:
+        pass

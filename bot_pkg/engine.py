@@ -368,3 +368,89 @@ def download_direct(url, chat_id, msg_id, task_id, client, dest_dir):
     fpath = os.path.join(dest_dir, files[0])
     logger.info(f"[{task_id}] direct download done — {fpath} ({fmtsz(os.path.getsize(fpath))})")
     return fpath
+
+def _ffprobe_meta(fpath):
+    """Returns {duration, width, height} via ffprobe, or {} if unavailable/
+    not a media file. Cheap (reads only headers)."""
+    import subprocess as sp
+    try:
+        out = sp.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height,duration:format=duration",
+             "-of", "json", fpath],
+            capture_output=True, text=True, timeout=20,
+        ).stdout
+        import json as _j
+        d = _j.loads(out or "{}")
+        st = ((d.get("streams") or [{}])[0])
+        meta = {
+            "duration": float(st.get("duration") or d.get("format", {}).get("duration") or 0) or None,
+            "width": st.get("width"),
+            "height": st.get("height"),
+        }
+        return {k: v for k, v in meta.items() if v}
+    except Exception:
+        return {}
+
+
+def fix_media_metadata(fpath):
+    """WZML-X-style metadata pass before upload. yt-dlp's ffmpeg merge can
+    produce files whose container-level duration/dimensions are missing or
+    wrong (Telegram then displays the video as "0 seconds"). Remuxing with
+    `-c copy` rewrites the header from the actual elementary streams without
+    recoding — near-instant, lossless, and fixes the tag problem at the
+    source. Falls back silently to the original file if ffmpeg is missing
+    or the file isn't remuxable."""
+    ext = os.path.splitext(fpath)[1].lower().lstrip(".")
+    if ext not in ("mp4", "mkv", "webm", "mov", "m4v", "ts", "mpg"):
+        return fpath
+    if not shutil_which("ffmpeg"):
+        return fpath
+    # Temp output keeps the ORIGINAL extension — ffmpeg picks its muxer from
+    # it (mp4/matroska/mpegts…), then we atomically swap the remuxed file in.
+    tmp = f"{fpath}.remux.{ext}"
+    args = ["ffmpeg", "-y", "-loglevel", "error", "-i", fpath,
+            "-map", "0", "-c", "copy", "-movflags", "+faststart", tmp]
+    try:
+        import subprocess as sp
+        r = sp.run(args, capture_output=True, text=True, timeout=300)
+        if r.returncode != 0 or not os.path.exists(tmp) or os.path.getsize(tmp) == 0:
+            _rm(tmp)
+            return fpath
+        # Keep the ORIGINAL extension (the container type doesn't change in
+        # a stream-copy remux; only headers are rewritten).
+        os.replace(tmp, fpath)
+    except Exception as e:
+        logger.warning(f"metadata remux failed for {fpath}: {e}")
+        _rm(tmp)
+    return fpath
+
+
+def _rm(p):
+    try:
+        if p and os.path.exists(p):
+            os.remove(p)
+    except OSError:
+        pass
+
+
+def probe_video_meta(fpath):
+    """Duration/dimensions for Telegram upload attributes — read straight
+    off the final file so they're always right, never guessed."""
+    m = _ffprobe_meta(fpath)
+    return {
+        "duration": int(m["duration"]) if m.get("duration") else 0,
+        "width": int(m["width"]) if m.get("width") else 0,
+        "height": int(m["height"]) if m.get("height") else 0,
+    }
+
+
+def shutil_which(name):
+    import shutil
+    return shutil.which(name)
+
+
+
+def shutil_which(name):
+    import shutil
+    return shutil.which(name)
