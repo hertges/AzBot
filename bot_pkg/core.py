@@ -5,6 +5,22 @@ from pyrogram.enums import ParseMode
 
 from . import config, state, log
 
+# ── Crash guards — must run BEFORE anything imports tgcrypto/pyrogram ───
+# 1) faulthandler: if native code segfaults again (exit 139), dump the C
+#    and Python stack traces to a file we can actually read afterwards.
+try:
+    import faulthandler
+    os.makedirs(config.LOG_DIR, exist_ok=True)
+    _fault_log = open(os.path.join(config.LOG_DIR, "crash.log"), "a", buffering=1)
+    faulthandler.enable(file=_fault_log, all_threads=True)
+except Exception:
+    pass
+
+# 2) TgCrypto guard: self-test the C extension in a subprocess; block it if
+#    it's the segfaulting kind (pure-Python fallback keeps the bot alive).
+from . import crypto_guard
+crypto_guard.install()
+
 log.setup()
 logger = log.get(__name__)
 
