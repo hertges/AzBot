@@ -83,6 +83,12 @@ def _bg_worker(worker_id):
             fn(*args)
         except Exception:
             logger.exception(f"worker-{worker_id} job {fn.__name__} raised")
+        except BaseException as e:
+            # A SystemExit/RecursionError-style escape would kill the whole
+            # interpreter (container restart). Log it with a faulthandler
+            # dump and keep the worker alive.
+            logger.critical(f"worker-{worker_id} job {fn.__name__} raised "
+                            f"BaseException: {type(e).__name__}: {e}", exc_info=True)
         finally:
             state.task_queue.task_done()
 

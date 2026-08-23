@@ -43,8 +43,10 @@ def _file_row(f):
     size = f" · {fmtsz(int(f['size']))}" if f.get("size") else ""
     name = f.get("name", "?")
     label = f"{icon} {name[:28]}{'…' if len(name) > 28 else ''}{size}"
-    cb = f"drvcd:{f['id']}" if is_folder else f"drvopen:{f['id']}"
-    return [InlineKeyboardButton(label, callback_data=cb)]
+    # Folders open the detail card (with Rename/Delete/Link/Open buttons);
+    # a long-press-free single tap used to jump straight inside, hiding
+    # those actions. Now BOTH files and folders show the detail view.
+    return [InlineKeyboardButton(label, callback_data=f"drvopen:{f['id']}")]
 
 
 def _render(chat_id, page=0):

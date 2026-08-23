@@ -126,10 +126,16 @@ def start_device_login(client, message, name):
             "(or a shared <code>GCP_CLIENT_ID/GCP_CLIENT_SECRET</code>), then retry.")
 
     state.set_awaiting_input(message.chat.id, ("drive_auth_code", name), None)
+    # NOTE: Google shut down the legacy urn:ietf:wg:oauth:2.0:oob redirect —
+    # using it yields "Error 400: redirect_uri_mismatch". The standard
+    # copy/paste workaround: redirect to a throwaway localhost port; the
+    # browser lands on a dead page whose ADDRESS BAR holds ?code=..., which
+    # the user copies back to us (exactly the old-bot UX).
+    redirect_uri = os.environ.get("GOOGLE_REDIRECT_URI", "http://localhost:1/")
     auth_url = ("https://accounts.google.com/o/oauth2/auth?"
                 + urlencode({
                     "client_id": cid,
-                    "redirect_uri": "urn:ietf:wg:oauth:2.0:oob",
+                    "redirect_uri": redirect_uri,
                     "response_type": "code",
                     "scope": SCOPES,
                     "access_type": "offline",
@@ -140,7 +146,9 @@ def start_device_login(client, message, name):
         f"1️⃣ Open the <a href=\"{auth_url}\">Authorization URL</a>\n"
         f"2️⃣ Sign in with your Google Drive account\n"
         f"3️⃣ Give permission to access Google Drive\n"
-        f"4️⃣ Copy the generated code or link and send it to me\n\n"
+        f"4️⃣ After approving you'll land on a page that <b>won't load</b> — "
+        f"that's normal. Copy the <b>full URL</b> from the address bar "
+        f"(it contains <code>?code=…</code>) and send it here.\n\n"
         f"💡 The account will be saved as <b>{esc(name)}</b>. "
         f"Send /cancel to abort.",
         disable_web_page_preview=True)
@@ -271,7 +279,7 @@ def _exchange_auth_code(client, message, name, text):
             "code": code,
             "client_id": cid,
             "client_secret": csec,
-            "redirect_uri": "urn:ietf:wg:oauth:2.0:oob",
+            "redirect_uri": os.environ.get("GOOGLE_REDIRECT_URI", "http://localhost:1/"),
             "grant_type": "authorization_code",
         }, timeout=20)
         d = r.json()

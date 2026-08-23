@@ -31,15 +31,16 @@ def _account():
 
 def _folder_by_name(srv, name, parent_id):
     safe = name.replace("'", "\\'")
-    q = (f"name = '{safe}' and mimeType = 'application/vnd.google-apps.folder' "
-         f"and '{parent_id}' in parents and trashed = false")
-    res = srv.files().list(q=q, fields="files(id)", pageSize=1).execute()
-    files = res.get("files", [])
-    if files:
-        return files[0]["id"]
-    meta = {"name": name, "mimeType": "application/vnd.google-apps.folder",
-            "parents": [parent_id]}
-    return srv.files().create(body=meta, fields="id").execute()["id"]
+    with drive.api_locked():
+        q = (f"name = '{safe}' and mimeType = 'application/vnd.google-apps.folder' "
+             f"and '{parent_id}' in parents and trashed = false")
+        res = srv.files().list(q=q, fields="files(id)", pageSize=1).execute()
+        files = res.get("files", [])
+        if files:
+            return files[0]["id"]
+        meta = {"name": name, "mimeType": "application/vnd.google-apps.folder",
+                "parents": [parent_id]}
+        return srv.files().create(body=meta, fields="id").execute()["id"]
 
 
 def _ensure_path(rel_dir):
@@ -79,32 +80,33 @@ def _upload(local_path, rel_path):
 
 
 def _upload_inner(local_path, rel_path):
-    try:
-        from . import drive
-        srv = drive.get_service(_account())
-        if not srv:
+    with drive.api_locked():
+        try:
+            from . import drive
+            srv = drive.get_service(_account())
+            if not srv:
+                return False
+            from googleapiclient.http import MediaFileUpload
+            d = os.path.dirname(rel_path)
+            pid = _ensure_path(d) if d else _ensure_path("")
+            if not pid:
+                return False
+            # overwrite if a file with this name already exists in that folder
+            safe = os.path.basename(rel_path).replace("'", "\\'")
+            q = (f"name = '{safe}' and '{pid}' in parents and trashed = false")
+            res = srv.files().list(q=q, fields="files(id)", pageSize=1).execute()
+            existing = res.get("files", [])
+            media = MediaFileUpload(local_path, resumable=False)
+            if existing:
+                srv.files().update(fileId=existing[0]["id"], media_body=media).execute()
+            else:
+                srv.files().create(body={"name": os.path.basename(rel_path), "parents": [pid]},
+                                   media_body=media, fields="id").execute()
+            logger.info(f"datastore: pushed {rel_path}")
+            return True
+        except Exception as e:
+            logger.warning(f"datastore: push {rel_path} failed: {e}")
             return False
-        from googleapiclient.http import MediaFileUpload
-        d = os.path.dirname(rel_path)
-        pid = _ensure_path(d) if d else _ensure_path("")
-        if not pid:
-            return False
-        # overwrite if a file with this name already exists in that folder
-        safe = os.path.basename(rel_path).replace("'", "\\'")
-        q = (f"name = '{safe}' and '{pid}' in parents and trashed = false")
-        res = srv.files().list(q=q, fields="files(id)", pageSize=1).execute()
-        existing = res.get("files", [])
-        media = MediaFileUpload(local_path, resumable=False)
-        if existing:
-            srv.files().update(fileId=existing[0]["id"], media_body=media).execute()
-        else:
-            srv.files().create(body={"name": os.path.basename(rel_path), "parents": [pid]},
-                               media_body=media, fields="id").execute()
-        logger.info(f"datastore: pushed {rel_path}")
-        return True
-    except Exception as e:
-        logger.warning(f"datastore: push {rel_path} failed: {e}")
-        return False
 
 
 def _download(remote_name, folder_id, local_path):
@@ -236,61 +238,64 @@ def pull_datafile(rel_path, local_path):
 
 def list_remote_files(rel_dir):
     """[filename, ...] inside AzBotData/<rel_dir>/ ([] on any failure)."""
-    try:
-        from . import drive
-        srv = drive.get_service(_account())
-        folder = _ensure_path(rel_dir)
-        if not srv or not folder:
+    with drive.api_locked():
+        try:
+            from . import drive
+            srv = drive.get_service(_account())
+            folder = _ensure_path(rel_dir)
+            if not srv or not folder:
+                return []
+            q = f"'{folder}' in parents and trashed = false"
+            res = srv.files().list(q=q, fields="files(name)", pageSize=200).execute()
+            return [f["name"] for f in res.get("files", [])]
+        except Exception as e:
+            logger.warning(f"datastore: list_remote_files({rel_dir}) failed: {e}")
             return []
-        q = f"'{folder}' in parents and trashed = false"
-        res = srv.files().list(q=q, fields="files(name)", pageSize=200).execute()
-        return [f["name"] for f in res.get("files", [])]
-    except Exception as e:
-        logger.warning(f"datastore: list_remote_files({rel_dir}) failed: {e}")
-        return []
 
 
 def remote_dir_exists(rel_dir):
     """True only if AzBotData/<rel_dir>/ actually exists — lets optional
     features (thumbs) skip their boot restore without touching Drive."""
-    try:
-        from . import drive
-        srv = drive.get_service(_account())
-        if not srv:
+    with drive.api_locked():
+        try:
+            from . import drive
+            srv = drive.get_service(_account())
+            if not srv:
+                return False
+            parent = _ensure_path("")
+            safe = rel_dir.strip("/").replace("'", "\\'")
+            q = (f"name = '{safe}' and mimeType = 'application/vnd.google-apps.folder' "
+                 f"and '{parent}' in parents and trashed = false")
+            res = srv.files().list(q=q, fields="files(id)", pageSize=1).execute()
+            return bool(res.get("files"))
+        except Exception:
             return False
-        parent = _ensure_path("")
-        safe = rel_dir.strip("/").replace("'", "\\'")
-        q = (f"name = '{safe}' and mimeType = 'application/vnd.google-apps.folder' "
-             f"and '{parent}' in parents and trashed = false")
-        res = srv.files().list(q=q, fields="files(id)", pageSize=1).execute()
-        return bool(res.get("files"))
-    except Exception:
-        return False
 
 
 def delete_remote_datafile(rel_path):
     """Best-effort removal of one file from the datastore."""
-    try:
-        from . import drive
-        srv = drive.get_service(_account())
-        d = os.path.dirname(rel_path)
-        folder = _ensure_path(d) if d else _ensure_path("")
-        if not srv or not folder:
+    with drive.api_locked():
+        try:
+            from . import drive
+            srv = drive.get_service(_account())
+            d = os.path.dirname(rel_path)
+            folder = _ensure_path(d) if d else _ensure_path("")
+            if not srv or not folder:
+                return False
+            safe = os.path.basename(rel_path).replace("'", "\\'")
+            q = f"name = '{safe}' and '{folder}' in parents and trashed = false"
+            res = srv.files().list(q=q, fields="files(id)", pageSize=5).execute()
+            n = 0
+            for f in res.get("files", []):
+                try:
+                    srv.files().delete(fileId=f["id"]).execute()
+                    n += 1
+                except Exception:
+                    pass
+            return n > 0
+        except Exception as e:
+            logger.warning(f"datastore: delete {rel_path} failed: {e}")
             return False
-        safe = os.path.basename(rel_path).replace("'", "\\'")
-        q = f"name = '{safe}' and '{folder}' in parents and trashed = false"
-        res = srv.files().list(q=q, fields="files(id)", pageSize=5).execute()
-        n = 0
-        for f in res.get("files", []):
-            try:
-                srv.files().delete(fileId=f["id"]).execute()
-                n += 1
-            except Exception:
-                pass
-        return n > 0
-    except Exception as e:
-        logger.warning(f"datastore: delete {rel_path} failed: {e}")
-        return False
 
 
 def restore_all_local():

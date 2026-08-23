@@ -59,7 +59,7 @@ def _clean_caption(fpath):
     name = name.replace("_", " ").strip()
     return name[:1020] or "file"
 
-def _send_one(client, chat_id, fpath, msg_id, caption=None, reply_to=None, task_id=None, video_meta=None):
+def _send_one(client, chat_id, fpath, msg_id, caption=None, reply_to=None, task_id=None, video_meta=None, thumb_url=None):
     auto_thumbs = []   # temp frame-grab files, deleted after upload
     ext = os.path.splitext(fpath)[1].lower()
     kwargs = dict(
@@ -77,10 +77,20 @@ def _send_one(client, chat_id, fpath, msg_id, caption=None, reply_to=None, task_
     duration = int(meta.get("duration") or 0) or None
     width = int(meta.get("width") or 0) or None
     height = int(meta.get("height") or 0) or None
-    # Thumbnail priority: user's /setthumb image → auto frame grab from the
-    # video itself (WZML-X parity: a frame at ~1/3 of the duration; fixes
-    # the black-thumbnail problem without any manual step).
+    # Thumbnail priority: source video's own thumbnail (YouTube etc.) →
+    # user's /setthumb image → ffmpeg frame grab from the file itself.
     thumb = state.get_thumb(chat_id)
+    if thumb_url and ext in VIDEO_EXT:
+        try:
+            import requests as _rq
+            _r = _rq.get(thumb_url, timeout=15)
+            if _r.ok and len(_r.content) > 2000:
+                _tp = fpath + ".src.jpg"
+                open(_tp, "wb").write(_r.content)
+                auto_thumbs.append(_tp)
+                thumb = _tp
+        except Exception as e:
+            logger.debug(f"source thumbnail fetch failed: {e}")
     if not thumb and ext in VIDEO_EXT and shutil.which("ffmpeg"):
         thumb = _auto_video_thumb(fpath, duration)
         if thumb:
@@ -98,7 +108,19 @@ def _send_one(client, chat_id, fpath, msg_id, caption=None, reply_to=None, task_
                 r = client.send_audio(audio=fpath, duration=duration, performer="AzLeechBot",
                                        thumb=thumb, **kwargs)
             elif ext in PHOTO_EXT:
-                r = client.send_photo(photo=fpath, **kwargs)
+                # Telegram shows small photos (esp. square IG images) as
+                # sticker-like cards in many clients. WZML-X rule: only
+                # genuinely large images go as photo; everything else is a
+                # document so the image always arrives full-quality.
+                try:
+                    pw, ph = _image_dimensions(fpath)
+                except Exception:
+                    pw, ph = 0, 0
+                big_enough = min(pw or 0, ph or 0) >= 480 and os.path.getsize(fpath) > 50 * 1024
+                if big_enough and not as_doc:
+                    r = client.send_photo(photo=fpath, **kwargs)
+                else:
+                    r = client.send_document(document=fpath, **kwargs)
             elif ext == ".webp":
                 # Animated webp → animation (loops inline); static webp →
                 # document. Never photo: Telegram would make it a sticker.
@@ -141,7 +163,8 @@ def _send_one(client, chat_id, fpath, msg_id, caption=None, reply_to=None, task_
                 raise
             time.sleep(2)
 
-def upload_to_telegram(client, chat_id, fpath, msg_id, reply_to=None, task_id=None, video_meta=None):
+def upload_to_telegram(client, chat_id, fpath, msg_id, reply_to=None, task_id=None,
+                       video_meta=None, thumb_url=None):
     """Uploads fpath natively over MTProto (Pyrogram). Files above Telegram's
     ~2GB cap are split — WZML-X style: VIDEOS get ffmpeg-segmented into
     playable parts (each with correct duration/metadata), everything else is
@@ -149,7 +172,7 @@ def upload_to_telegram(client, chat_id, fpath, msg_id, reply_to=None, task_id=No
     size = os.path.getsize(fpath)
     if size <= config.TG_MAX_FILE_BYTES:
         return [_send_one(client, chat_id, fpath, msg_id, reply_to=reply_to, task_id=task_id,
-                          video_meta=video_meta)]
+                          video_meta=video_meta, thumb_url=thumb_url)]
 
     ext = os.path.splitext(fpath)[1].lower()
     if ext in VIDEO_EXT and shutil.which("ffmpeg"):
@@ -239,6 +262,17 @@ def engine_probe_meta(fpath):
     """Lazy import to avoid a circular import at module load."""
     from . import engine
     return engine.probe_video_meta(fpath)
+
+
+def _image_dimensions(fpath):
+    """(width, height) via ffprobe — used to decide photo vs document."""
+    import subprocess
+    r = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=width,height", "-of", "csv=p=0", fpath],
+        capture_output=True, text=True, timeout=20)
+    w, h = r.stdout.strip().split(",")[:2]
+    return int(w), int(h)
 
 
 def _auto_video_thumb(fpath, duration):

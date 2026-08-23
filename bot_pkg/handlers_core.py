@@ -1076,6 +1076,7 @@ def queue_leech_job(client, message, url, dest, zip_output=False, format_selecto
 def run_leech_job(client, chat_id, msg_id, url, task_id, reply_to, dest, zip_output=False,
                   format_selector=None, rename=None, folder=None):
     task_dir = os.path.join(config.DOWNLOAD_DIR, task_id)
+    _source_thumb_url = None   # original video's thumbnail (YouTube etc.)
     try:
         if not state.ensure_free(config.MIN_FREE_MB):
             return throttled_edit(client, chat_id, msg_id, "❌ Disk full, try again later.", force=True)
@@ -1100,6 +1101,10 @@ def run_leech_job(client, chat_id, msg_id, url, task_id, reply_to, dest, zip_out
             info = None
         else:
             fpath, info = engine.download(url, chat_id, msg_id, task_id, client, task_dir, format_selector=format_selector)
+            # Remember the ORIGINAL video's thumbnail so the Telegram upload
+            # shows exactly what the YouTube page shows (WZML-X parity).
+            if isinstance(info, dict):
+                _source_thumb_url = info.get("thumbnail")
 
         if state.is_cancelled(task_id):
             return throttled_edit(client, chat_id, msg_id, "🛑 Cancelled.", force=True)
@@ -1141,7 +1146,8 @@ def run_leech_job(client, chat_id, msg_id, url, task_id, reply_to, dest, zip_out
                 size = os.path.getsize(fpath)
             throttled_edit(client, chat_id, msg_id, f"☁️ Uploading… (<code>{fmtsz(size)}</code>)", markup=cancel_kb(task_id), force=True)
             uploader.upload_to_telegram(client, chat_id, fpath, msg_id, reply_to=reply_to, task_id=task_id,
-                                        video_meta=engine.probe_video_meta(fpath))
+                                        video_meta=engine.probe_video_meta(fpath),
+                                        thumb_url=_source_thumb_url)
         elif dest == "drive":
             throttled_edit(client, chat_id, msg_id, "☁️ Uploading to Drive…", markup=cancel_kb(task_id), force=True)
             dinfo = drive.upload_file_full(fpath, task_id=task_id, rename=rename,
