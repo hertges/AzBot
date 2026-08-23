@@ -72,7 +72,8 @@ def queue_subprocess_job(client, message, cmd, url, dest="telegram", zip_output=
                            (client, message.chat.id, status.id, cmd, url, task_id, message.id, dest, zip_output)))
 
 
-def run_subprocess_job(client, chat_id, msg_id, cmd, url, task_id, reply_to, dest="telegram", zip_output=False):
+def run_subprocess_job(client, chat_id, msg_id, cmd, url, task_id, reply_to,
+                       dest="telegram", zip_output=False):
     task_dir = os.path.join(config.DOWNLOAD_DIR, task_id)
     os.makedirs(task_dir, exist_ok=True)
     cookie_file = state.active_cookie_file(chat_id)
@@ -192,7 +193,8 @@ def run_subprocess_job(client, chat_id, msg_id, cmd, url, task_id, reply_to, des
                         InlineKeyboardButton("🗑 Delete", callback_data=f"qdel:{info['id']}"),
                     ]])
             os.remove(zpath)
-            summary = f"✅ Done → {config.DEST_LABEL[dest]}"
+            summary = (f"✅ <b>{esc(os.path.basename(zpath))}</b>\n"
+                       f"📦 <code>{fmtsz(os.path.getsize(zpath)) if os.path.exists(zpath) else ''}</code> → {config.DEST_LABEL[dest]}")
             if link:
                 summary += f"\n{link}"
             throttled_edit(client, chat_id, msg_id, summary, markup=done_kb, force=True)
@@ -215,7 +217,7 @@ def run_subprocess_job(client, chat_id, msg_id, cmd, url, task_id, reply_to, des
                 force=True,
             )
 
-        summary = f"✅ Done — {sent} file(s) → {config.DEST_LABEL[dest]}"
+        summary = f"✅ {sent} file(s) → {config.DEST_LABEL[dest]}"
         if errors:
             summary += f"\n⚠️ {len(errors)} failed."
         throttled_edit(client, chat_id, msg_id, summary, force=True)

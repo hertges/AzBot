@@ -665,12 +665,12 @@ def dispatch_link(client, message, url, dest, zip_output=False, rename=None, fol
     if url.startswith("magnet:") or url.lower().endswith(".torrent"):
         from .handlers_subproc import queue_subprocess_job
         return queue_subprocess_job(client, message, "torrent", url, dest, zip_output)
-
     if host in ("drive.google.com",):
         m = GDRIVE_RE.search(url)
         if m:
             file_id = m.group(1) or m.group(2)
-            return queue_gdrive_job(client, message, file_id, dest, zip_output)
+            return queue_gdrive_job(client, message, file_id, dest, zip_output,
+                                     rename=rename, folder=folder)
 
     if any(host == h or host.endswith("." + h) for h in config.IG_HOSTS):
         from .handlers_instagram import dispatch_instagram
@@ -679,7 +679,7 @@ def dispatch_link(client, message, url, dest, zip_output=False, rename=None, fol
     queue_leech_job(client, message, url, dest, zip_output, rename=rename, folder=folder)
 
 
-def queue_gdrive_job(client, message, file_id, dest, zip_output=False):
+def queue_gdrive_job(client, message, file_id, dest, zip_output=False, rename=None, folder=None):
     if not drive.enabled():
         return message.reply_text(
             "☁️ That's a Google Drive link, but Drive isn't configured on this bot "
@@ -693,10 +693,12 @@ def queue_gdrive_job(client, message, file_id, dest, zip_output=False):
     task_dir = os.path.join(config.DOWNLOAD_DIR, task_id)
     state.register_job(task_id, message.chat.id, status.id, "gdrive", task_dir)
     state.task_queue.put((run_gdrive_job,
-                           (client, message.chat.id, status.id, file_id, task_id, message.id, dest, zip_output)))
+                           (client, message.chat.id, status.id, file_id, task_id, message.id,
+                            dest, zip_output, rename, folder)))
 
 
-def run_gdrive_job(client, chat_id, msg_id, file_id, task_id, reply_to, dest, zip_output=False):
+def run_gdrive_job(client, chat_id, msg_id, file_id, task_id, reply_to, dest,
+                   zip_output=False, rename=None, folder=None):
     task_dir = os.path.join(config.DOWNLOAD_DIR, task_id)
     os.makedirs(task_dir, exist_ok=True)
     try:
@@ -741,19 +743,39 @@ def run_gdrive_job(client, chat_id, msg_id, file_id, task_id, reply_to, dest, zi
             size = os.path.getsize(fpath)
             done_kb = None
             link = None
+            final_name = os.path.basename(fpath)
             if dest == "telegram":
+                if rename:
+                    rename = rename.strip()
+                    ext = os.path.splitext(fpath)[1]
+                    if ext and not rename.lower().endswith(ext.lower()):
+                        rename = rename + ext
+                    new_path = os.path.join(os.path.dirname(fpath), rename)
+                    try:
+                        os.rename(fpath, new_path)
+                        fpath = new_path
+                    except OSError:
+                        pass
+                    size = os.path.getsize(fpath)
                 throttled_edit(client, chat_id, msg_id, f"☁️ Uploading… (<code>{fmtsz(size)}</code>)", markup=cancel_kb(task_id), force=True)
                 uploader.upload_to_telegram(client, chat_id, fpath, msg_id, reply_to=reply_to, task_id=task_id)
             else:
                 throttled_edit(client, chat_id, msg_id, "☁️ Uploading to Drive…", markup=cancel_kb(task_id), force=True)
-                info = drive.upload_file_full(fpath, task_id=task_id)
+                info = drive.upload_file_full(fpath, task_id=task_id, rename=rename,
+                                               folder=folder, chat_id=chat_id)
                 if info:
                     link = info["link"]
                     done_kb = InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🔗 Get link", callback_data=f"qlink:{info['id']}"),
+                        InlineKeyboardButton("📥 Send to Telegram", callback_data=f"qsnd:{info['id']}"),
+                    ], [
                         InlineKeyboardButton("✏️ Rename", callback_data=f"qren:{info['id']}"),
                         InlineKeyboardButton("🗑 Delete", callback_data=f"qdel:{info['id']}"),
                     ]])
-            summary = f"✅ Done — <code>{fmtsz(size)}</code> → {config.DEST_LABEL[dest]}"
+            summary = (f"✅ <b>{esc(final_name)}</b>\n"
+                       f"📦 <code>{fmtsz(size)}</code> → {config.DEST_LABEL[dest]}")
+            if folder and dest == "drive":
+                summary += f" 📁<code>{esc(folder)}</code>"
             if link:
                 summary += f"\n{link}"
             throttled_edit(client, chat_id, msg_id, summary, markup=done_kb, force=True)
@@ -878,9 +900,14 @@ def run_leech_job(client, chat_id, msg_id, url, task_id, reply_to, dest, zip_out
 
         if dest == "telegram":
             if rename:
-                # Rename without touching the extension: swap basename only.
+                # Extension is NEVER replaced: append the real one if the
+                # requested name doesn't already end with it ("my.video"
+                # keeps ".mp4"; "clip.mp4" stays "clip.mp4").
+                rename = rename.strip()
                 ext = os.path.splitext(fpath)[1]
-                new_path = os.path.join(os.path.dirname(fpath), rename + ext)
+                if ext and not rename.lower().endswith(ext.lower()):
+                    rename = rename + ext
+                new_path = os.path.join(os.path.dirname(fpath), rename)
                 try:
                     os.rename(fpath, new_path)
                     fpath = new_path
@@ -904,10 +931,13 @@ def run_leech_job(client, chat_id, msg_id, url, task_id, reply_to, dest, zip_out
                     InlineKeyboardButton("🗑 Delete", callback_data=f"qdel:{dinfo['id']}"),
                 ]])
 
-        summary = f"✅ Done — <code>{fmtsz(size)}</code> → {config.DEST_LABEL[dest]}"
+        summary = (f"✅ <b>{esc(os.path.basename(fpath))}</b>\n"
+                   f"📦 <code>{fmtsz(size)}</code> → {config.DEST_LABEL[dest]}")
+        if folder and dest == "drive":
+            summary += f" 📁<code>{esc(folder)}</code>"
         title = (info or {}).get("title") if isinstance(info, dict) else None
-        if title:
-            summary = f"🎬 <b>{esc(str(title)[:80])}</b>\n{summary}"
+        if title and dest != "telegram":
+            summary = f"🎬 {esc(str(title)[:80])}\n{summary}"
         if links:
             summary += "\n" + "\n".join(links)
         throttled_edit(client, chat_id, msg_id, summary, markup=file_kb, force=True)

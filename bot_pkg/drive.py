@@ -159,8 +159,14 @@ def upload_file_full(fpath, progress_cb=None, task_id=None, rename=None,
     base = os.path.basename(fpath)
     ext = os.path.splitext(base)[1]
     if rename:
-        wanted = rename if os.path.splitext(rename)[1] else rename + ext  # never touch the extension
-        name = wanted
+        # Extension is NEVER replaced by the requested name: if |name lacks
+        # the file's real extension we append it; if the user already typed
+        # the same extension we don't double it. A dotted name like "my.v2"
+        # still keeps the true ".mp4".
+        rename = rename.strip()
+        if ext and not rename.lower().endswith(ext.lower()):
+            rename = rename + ext
+        name = rename
     else:
         name = base
 
