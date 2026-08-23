@@ -196,3 +196,93 @@ def pull_settings_if_missing():
     if ok:
         logger.info("datastore: restored settings.json from Drive")
     return ok
+
+
+# ── generic small-file persistence (cookies / users / oauth overrides) ──
+
+def push_datafile(local_path, rel_path):
+    """Push any small support file (cookies/<n>.txt, users.json,
+    overrides.json) into AzBotData/. Best-effort."""
+    if not local_path or not os.path.exists(local_path):
+        return False
+    return _upload(local_path, rel_path)
+
+
+def pull_datafile(rel_path, local_path):
+    """Download AzBotData/<rel_path> into local_path if missing locally.
+    Returns True if pulled."""
+    if os.path.exists(local_path):
+        return False
+    d = os.path.dirname(rel_path)
+    folder = _ensure_path(d) if d else _ensure_path("")
+    if not folder:
+        return False
+    ok = _download(os.path.basename(rel_path), folder, local_path)
+    if ok:
+        logger.info(f"datastore: restored {rel_path}")
+    return ok
+
+
+def list_remote_files(rel_dir):
+    """[filename, ...] inside AzBotData/<rel_dir>/ (empty on any failure)."""
+    try:
+        from . import drive
+        srv = drive.get_service(_account())
+        folder = _ensure_path(rel_dir)
+        if not srv or not folder:
+            return []
+        q = f"'{folder}' in parents and trashed = false"
+        res = srv.files().list(q=q, fields="files(name)", pageSize=200).execute()
+        return [f["name"] for f in res.get("files", [])]
+    except Exception as e:
+        logger.warning(f"datastore: list_remote_files({rel_dir}) failed: {e}")
+        return []
+
+
+def delete_remote_datafile(rel_path):
+    """Best-effort removal of one file from the datastore."""
+    try:
+        from . import drive
+        srv = drive.get_service(_account())
+        d = os.path.dirname(rel_path)
+        folder = _ensure_path(d) if d else _ensure_path("")
+        if not srv or not folder:
+            return False
+        safe = os.path.basename(rel_path).replace("'", "\\'")
+        q = f"name = '{safe}' and '{folder}' in parents and trashed = false"
+        res = srv.files().list(q=q, fields="files(id)", pageSize=5).execute()
+        n = 0
+        for f in res.get("files", []):
+            try:
+                srv.files().delete(fileId=f["id"]).execute()
+                n += 1
+            except Exception:
+                pass
+        return n > 0
+    except Exception as e:
+        logger.warning(f"datastore: delete {rel_path} failed: {e}")
+        return False
+
+
+def restore_all_local():
+    """Boot-time: pull down every missing local piece from AzBotData/ —
+    settings.json, users.json, overrides.json, cookies/*.txt."""
+    pulled = []
+    if pull_datafile("settings.json", config.SETTINGS_FILE):
+        pulled.append("settings")
+    if pull_datafile("users.json", config.USERS_FILE):
+        pulled.append("users")
+    if pull_datafile("overrides.json", OVERRIDES_PATH()):
+        pulled.append("overrides")
+    os.makedirs(config.COOKIES_DIR, exist_ok=True)
+    for name in list_remote_files("cookies"):
+        local = os.path.join(config.COOKIES_DIR, name)
+        if pull_datafile(f"cookies/{name}", local):
+            pulled.append(f"cookie:{name}")
+    if pulled:
+        logger.info(f"datastore: restored from Drive: {', '.join(pulled)}")
+    return pulled
+
+
+def OVERRIDES_PATH():
+    return os.path.join(config.DATA_DIR, "overrides.json")

@@ -100,11 +100,13 @@ def start():
     _lock_fh = _acquire_single_instance_lock()
     from . import engine
     engine.update_yt_dlp(restart_on_update=True)  # safe here — nothing is serving yet
-    # Restore settings.json from the Drive datastore on a fresh deploy
-    # (data/ empty but AzBotData/settings.json exists in Drive).
+    # Restore EVERYTHING user-configured from the Drive datastore on a fresh
+    # deploy: settings, users (access control), cookies, OAuth tokens.
     try:
         from . import datastore
-        datastore.pull_settings_if_missing()
+        pulled = datastore.restore_all_local()
+        if pulled:
+            logger.info(f"datastore: restored {', '.join(pulled)}")
         import importlib
         importlib.reload(state)
     except Exception as e:

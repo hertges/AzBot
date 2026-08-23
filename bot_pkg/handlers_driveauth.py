@@ -45,6 +45,12 @@ def _save_override(name, refresh_token):
     data = state._load_json(OVERRIDES_FILE, {})
     data[f"GDrive_{name}_REFRESH_TOKEN"] = refresh_token
     state._save_json(OVERRIDES_FILE, data)
+    # Mirror to the Drive datastore so tokens survive restarts/redeploys.
+    try:
+        from . import datastore
+        datastore.push_datafile(OVERRIDES_FILE, "overrides.json")
+    except Exception as e:
+        logger.warning(f"override mirror failed: {e}")
 
 
 def _register_account(name, refresh_token):
@@ -82,21 +88,34 @@ def _load_overrides_into_config():
         logger.info(f"datastore: {n} Telegram-registered drive account(s) loaded")
 
 
-@app.on_message(filters.command(["drivelogin", "addaccount"]) & AdminOnly)
-@guarded
-def cmd_drivelogin(client, message):
-    parts = message.text.split(maxsplit=1)
-    if len(parts) < 2 or not parts[1].strip():
-        existing = ", ".join(sorted(config.DRIVE_ACCOUNTS)) or "none"
-        return message.reply_text(
-            "☁️ <b>Add a Drive account</b>\n\n"
-            f"1. Send: <code>/drivelogin &lt;name&gt;</code> (e.g. <code>/drivelogin work</code>)\n"
-            f"2. I'll give you a code + link — open it, sign in, type the code.\n\n"
-            f"Active accounts: <code>{esc(existing)}</code> • "
-            f"switch per chat in /settings.")
-    name = re.sub(r"[^a-z0-9_-]", "", parts[1].strip().lower())
+def remove_account(name):
+    """Removes a Telegram-registered account: token file entry, runtime
+    registration, and any chat pointing at it falls back to default."""
+    data = state._load_json(OVERRIDES_FILE, {})
+    key = f"GDrive_{name}_REFRESH_TOKEN"
+    if key not in data:
+        raise RuntimeError("account wasn't added from Telegram")
+    del data[key]
+    state._save_json(OVERRIDES_FILE, data)
+    try:
+        from . import datastore
+        datastore.push_datafile(OVERRIDES_FILE, "overrides.json")
+    except Exception:
+        pass
+    config.DRIVE_ACCOUNTS.pop(name, None)
+    with drive._srv_lock:
+        drive._srv_cache.pop(name, None)
+    logger.info(f"drive account '{name}' removed")
+
+
+def start_device_login(client, message, name):
+    """Begins the OAuth device flow for account `name`. Called from
+    /drivelogin <name> and from Settings → ☁️ Drive → ➕ Add account."""
+    name = re.sub(r"[^a-z0-9_-]", "", (name or "").lower())
     if not name:
         return message.reply_text("⚠️ Account name: letters/digits/-/_ only.")
+    if name in config.DRIVE_ACCOUNTS:
+        return message.reply_text(f"⚠️ Account <code>{esc(name)}</code> already exists.")
     cid, csec = _client_pair(name)
     if not cid:
         return message.reply_text(
@@ -131,6 +150,20 @@ def cmd_drivelogin(client, message):
         "I'll detect approval automatically (checking every few seconds).")
 
     threading.Thread(target=_poll_approval, daemon=True).start()
+
+
+@app.on_message(filters.command(["drivelogin", "addaccount"]) & AdminOnly)
+@guarded
+def cmd_drivelogin(client, message):
+    parts = message.text.split(maxsplit=1)
+    existing = ", ".join(sorted(config.DRIVE_ACCOUNTS)) or "none"
+    if len(parts) < 2 or not parts[1].strip():
+        return message.reply_text(
+            "☁️ <b>Add a Drive account</b>\n\n"
+            f"1. Send: <code>/drivelogin &lt;name&gt;</code> (e.g. <code>/drivelogin work</code>)\n"
+            f"…or use /settings → ☁️ Drive → ➕ Add account.\n\n"
+            f"Active accounts: <code>{esc(existing)}</code>")
+    start_device_login(client, message, parts[1].strip())
 
 
 def _poll_approval(chat_id=None):

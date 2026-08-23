@@ -152,6 +152,7 @@ def cmd_cookie(client, message):
         path = state.cookie_path(name)
         client.download_media(doc_msg, file_name=path)
         state.set_pref(message.chat.id, "active_cookie", name)
+        state.mirror_cookie(name)   # persist to Drive datastore
         logger.info(f"chat {message.chat.id} saved cookie profile '{name}'")
         return message.reply_text(f"🍪 Saved cookie profile <code>{esc(name)}</code> and made it active.")
     if len(parts) > 1:
@@ -270,15 +271,15 @@ def _settings_kb(chat_id):
     doc_on = state.get_as_document(chat_id)
     rows = [
         [InlineKeyboardButton(
-            "🧹 Auto-clean chat: " + ("✅ ON" if clean_on else "⬜ OFF"),
+            "🧹 Auto-clean: " + ("✅ ON" if clean_on else "⬜ OFF"),
             callback_data="toggle_autoclean")],
         [InlineKeyboardButton(
-            "📄 Always send as document: " + ("✅ ON" if doc_on else "⬜ OFF"),
+            "📄 Send as document: " + ("✅ ON" if doc_on else "⬜ OFF"),
             callback_data="toggle_as_document")],
+        [InlineKeyboardButton(f"☁️ Drive ({len(config.DRIVE_ACCOUNTS)} account"
+                              f"{'s' if len(config.DRIVE_ACCOUNTS) != 1 else ''}) ▸",
+                              callback_data="acctmenu")],
     ]
-    if len(config.DRIVE_ACCOUNTS) > 1:
-        acct = state.get_drive_account(chat_id) or "—"
-        rows.append([InlineKeyboardButton(f"☁️ Drive account: {acct} ▸", callback_data="acctmenu")])
     return InlineKeyboardMarkup(rows)
 
 def _settings_text(chat_id):
@@ -299,10 +300,9 @@ def _settings_text(chat_id):
         "📄 <b>As document</b>: off — videos/audio/photos upload as their "
         "native type with previews and streaming."
     )
-    extra = ""
-    if len(config.DRIVE_ACCOUNTS) > 1:
-        acct = state.get_drive_account(chat_id) or "—"
-        extra = f"\n\n☁️ <b>Drive account</b>: <code>{esc(acct)}</code> — where /m and /zipd upload."
+    acct = state.get_drive_account(chat_id) or "—"
+    extra = (f"\n\n☁️ <b>Drive</b>: {len(config.DRIVE_ACCOUNTS)} account(s), "
+             f"this chat uploads to <code>{esc(acct)}</code>.")
     return f"⚙️ <b>Settings</b> <i>(this chat only)</i>\n\n{clean_line}\n\n{doc_line}{extra}"
 
 @app.on_message(filters.command("settings") & Authorized)
@@ -313,20 +313,67 @@ def cmd_settings(client, message):
 @app.on_callback_query(filters.regex(r"^acctmenu$"))
 @guarded
 def cb_acct_menu(client, cq):
+    """☁️ Drive management section: list accounts, add via OAuth device
+    flow, remove Telegram-registered ones, pick the active one."""
     chat_id = cq.message.chat.id
     current = state.get_drive_account(chat_id)
-    rows, row = [], []
-    for name in config.DRIVE_ACCOUNTS:
+    lines = []
+    rows = []
+    for name in sorted(config.DRIVE_ACCOUNTS):
         mark = "✅ " if name == current else ""
-        row.append(InlineKeyboardButton(f"{mark}{name}", callback_data=f"acctset:{name}"))
-        if len(row) == 2:
-            rows.append(row); row = []
-    if row:
+        lines.append(f"{mark}<code>{esc(name)}</code>")
+        row = [InlineKeyboardButton(("🟢 " if name == current else "") + name,
+                                     callback_data=f"acctset:{name}")]
+        # only Telegram-registered accounts can be removed here
+        if name in _tg_registered_accounts():
+            row.append(InlineKeyboardButton("🗑", callback_data=f"acctdel:{name}"))
         rows.append(row)
-    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="acctback")])
-    safe_edit(cq, "☁️ <b>Pick the Drive account</b> for this chat:",
-              reply_markup=InlineKeyboardMarkup(rows))
+    text = ("☁️ <b>Drive accounts</b>\n\n"
+            + ("\n".join(lines) if lines else "_none configured_")
+            + f"\n\nThis chat uploads to: <b>{esc(current or '—')}</b>\n\n"
+              "➕ adds a new Google account via a sign-in code — no console needed. "
+              "🗑 removes an account added through Telegram (.env accounts are managed in .env).")
+    rows.append([InlineKeyboardButton("➕ Add account", callback_data="acctadd")])
+    rows.append([InlineKeyboardButton("⬅️ Back to settings", callback_data="settingsback")])
+    safe_edit(cq, text, reply_markup=InlineKeyboardMarkup(rows))
     cq.answer()
+
+
+def _tg_registered_accounts():
+    """Account names whose tokens came from Telegram /drivelogin."""
+    try:
+        from . import handlers_driveauth
+        data = state._load_json(handlers_driveauth.OVERRIDES_FILE, {})
+        return {k[len("GDrive_"):-len("_REFRESH_TOKEN")]
+                for k in data if k.startswith("GDrive_") and k.endswith("_REFRESH_TOKEN")}
+    except Exception:
+        return set()
+
+
+@app.on_callback_query(filters.regex(r"^acctadd$"))
+@guarded
+def cb_acct_add(client, cq):
+    state.set_awaiting_input(cq.message.chat.id, "drive_acct_name", None)
+    safe_edit(cq, "✏️ Reply with a <b>name</b> for the new Drive account "
+                  "(letters/digits/-/_, e.g. <code>work</code> or <code>backup2</code>). "
+                  "Send /cancel to abort.")
+    cq.answer()
+
+
+@app.on_callback_query(filters.regex(r"^acctdel:"))
+@guarded
+def cb_acct_del(client, cq):
+    name = cq.data.split(":", 1)[1]
+    if name not in _tg_registered_accounts():
+        return cq.answer(".env-defined accounts can't be removed here.", show_alert=True)
+    try:
+        from . import handlers_driveauth
+        handlers_driveauth.remove_account(name)
+        cq.answer(f"🗑 {name} removed.")
+        cb_acct_menu(client, cq)   # re-render
+    except Exception as e:
+        cq.answer(f"❌ {e}", show_alert=True)
+
 
 @app.on_callback_query(filters.regex(r"^acctset:"))
 @guarded
@@ -335,9 +382,7 @@ def cb_acct_set(client, cq):
     ok = state.set_drive_account(cq.message.chat.id, name)
     cq.answer(f"Switched to {name}" if ok else "Unknown account.", show_alert=not ok)
     if ok:
-        kb_rows = [[InlineKeyboardButton("⚙️ Back to settings", callback_data="settingsback")]]
-        safe_edit(cq, f"☁️ Drive uploads now go to account <code>{esc(name)}</code>.",
-                  reply_markup=InlineKeyboardMarkup(kb_rows))
+        cb_acct_menu(client, cq)   # re-render with new selection
 
 @app.on_callback_query(filters.regex(r"^settingsback$"))
 @guarded
@@ -968,6 +1013,9 @@ def auto_leech(client, message):
         kind, target = pending
         if kind == "cookie_rename":
             return handle_cookie_rename(client, message, target)
+        if kind == "drive_acct_name":
+            from .handlers_driveauth import start_device_login
+            return start_device_login(client, message, (message.text or "").strip())
         if isinstance(kind, tuple) and kind[0] == "drive_rename":
             from .handlers_drive import handle_drive_rename
             return handle_drive_rename(client, message, kind[1], target)

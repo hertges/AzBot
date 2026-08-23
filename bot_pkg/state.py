@@ -43,6 +43,14 @@ def save_settings():
 def save_users():
     with _lock:
         _save_json(config.USERS_FILE, list(_allowed_users))
+    # Mirror access control to Drive (AzBotData/users.json).
+    try:
+        from . import datastore
+        import threading as _th
+        _th.Thread(target=datastore.push_datafile,
+                   args=(config.USERS_FILE, "users.json"), daemon=True).start()
+    except Exception:
+        pass
 
 def is_authorized(user_id):
     if not config.ADMIN_ID:
@@ -169,6 +177,44 @@ def cookie_path(name="global"):
     safe = re.sub(r"[^\w\-]", "_", name)
     return os.path.join(config.COOKIES_DIR, f"{safe}.txt")
 
+def mirror_cookie(name):
+    """Push one cookie file to the Drive datastore (best-effort, async)."""
+    p = cookie_path(name)
+    if not os.path.exists(p):
+        return
+    try:
+        from . import datastore
+        import threading as _th
+        _th.Thread(target=datastore.push_datafile,
+                   args=(p, f"cookies/{os.path.basename(p)}"), daemon=True).start()
+    except Exception:
+        pass
+
+def unmirror_cookie(name):
+    """Remove a cookie file from the Drive datastore (best-effort, async)."""
+    try:
+        from . import datastore
+        safe = re.sub(r"[^\w\-]", "_", name)
+        import threading as _th
+        _th.Thread(target=datastore.delete_remote_datafile,
+                   args=(f"cookies/{safe}.txt",), daemon=True).start()
+    except Exception:
+        pass
+
+def restore_cookies():
+    """Boot-time: pull every cookie from AzBotData/cookies/ that's missing
+    locally. Returns count restored."""
+    n = 0
+    try:
+        from . import datastore
+        for fname in datastore.list_remote_files("cookies"):
+            local = os.path.join(config.COOKIES_DIR, fname)
+            if not os.path.exists(local) and datastore.pull_datafile(f"cookies/{fname}", local):
+                n += 1
+    except Exception as e:
+        logger.warning(f"cookie restore skipped: {e}")
+    return n
+
 def list_cookie_profiles():
     return [os.path.splitext(f)[0] for f in os.listdir(config.COOKIES_DIR) if f.endswith(".txt")]
 
@@ -196,6 +242,7 @@ def delete_cookie_profile(chat_id, name):
     if not os.path.exists(path):
         return False
     os.remove(path)
+    unmirror_cookie(name)   # remove from Drive datastore too
     if get_prefs(chat_id).get("active_cookie") == name:
         set_pref(chat_id, "active_cookie", "global")
     logger.info(f"cookie profile '{name}' deleted")
