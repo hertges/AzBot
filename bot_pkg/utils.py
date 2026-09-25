@@ -1,4 +1,4 @@
-import math, time, threading, os, re, zipfile, uuid, html as _html
+import math, time, threading, os, re, zipfile, uuid, hashlib, html as _html
 
 from pyrogram.errors import FloodWait, MessageNotModified
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -30,18 +30,25 @@ def parse_payload(raw):
         return [], None, None
     raw = raw.strip()
     folder = None
-    fm = re.search(r"#([^\s|]+)", raw)
+    # URL #fragments (…/video#t=10s) are client-side junk, not Drive
+    # folders: mask URLs first, then accept only a STANDALONE #folder
+    # token from the remaining text.
+    _masked = re.sub(r"(?:magnet:\?xt=urn:btih:[A-Za-z0-9]\S*|https?://\S+)", " ", raw)
+    fm = re.search(r"#([^\s|]+)", _masked)
     if fm:
         folder = fm.group(1).strip()
-        raw = (raw[:fm.start()] + " " + raw[fm.end():])
+        raw = raw.replace("#" + fm.group(1), " ", 1)
 
     rename = None
     parts = [p.strip() for p in raw.split("|", 1)]
     if len(parts) == 2 and parts[1] and not parts[1].startswith("http"):
         raw, rename = parts[0], parts[1]
 
-    links = [u.rstrip(").,]>\"'")
-             for u in re.findall(r"(?:magnet:\?xt=urn:btih:[A-Za-z0-9]\S*|https?://\S+)", raw)]
+    links = []
+    for u in re.findall(r"(?:magnet:\?xt=urn:btih:[A-Za-z0-9]\S*|https?://\S+)", raw):
+        if u.startswith("http"):
+            u = u.split("#", 1)[0]  # client-side fragment, not part of the file
+        links.append(u.rstrip(").,]>\"'"))
     return links, rename, folder
 
 def cancel_kb(task_id):
@@ -84,6 +91,19 @@ _seen_updates = {}
 _seen_lock = threading.Lock()
 _DEDUP_TTL = 8  # seconds
 
+# Dedicated pool for handler bodies (see guarded). Explicit pool instead of
+# asyncio.to_thread's default: capacity must not depend on CPU count, and
+# run_in_executor(pool, ...) works on whichever loop pyrogram actually runs.
+# Reuse config.HANDLER_WORKERS rather than re-reading the env var here too —
+# this used to read os.environ.get("HANDLER_WORKERS", "16") independently,
+# which (a) duplicated config.py's own copy of the same setting and could
+# drift out of sync with it, and (b) had the same blank-env-var crash bug
+# fixed in config.py (int("") raises when the var is set but empty).
+from concurrent.futures import ThreadPoolExecutor as _TPE
+from . import config as _config
+AZ_HANDLER_POOL = _TPE(max_workers=_config.HANDLER_WORKERS,
+                       thread_name_prefix="azhandler")
+
 def _dedup_key(update):
     """Unique-enough key for an incoming Message or CallbackQuery, used to
     detect the same update being handed to us twice."""
@@ -111,40 +131,64 @@ def _mark_if_new(key):
         return True
 
 def guarded(fn):
-    """Wraps a Pyrogram message/callback handler two ways:
+    """Wraps a Pyrogram message/callback handler three ways:
 
-    1. Any exception the handler doesn't catch itself gets reported into
-       the chat instead of silently vanishing into the logs — Pyrogram's
-       dispatcher just logs handler exceptions and moves on, which from
-       the user's side looks like the bot ignored them.
-    2. Defends against the same update being processed twice — e.g. two
+    1. OFF-LOOP EXECUTION (v17): Pyrogram runs handlers on the network
+       asyncio loop. A sync handler that blocks there — Drive API calls
+       waiting on the global API lock during a big upload, ffprobe,
+       cookie-file IO — freezes the ENTIRE bot: commands stop answering,
+       the 🛑 Stop button goes dead, and pending EditMessages pile up into
+       "Request timed out" retry storms. The handler body now runs in a
+       thread-pool worker via asyncio.to_thread, so the loop stays free
+       no matter what a handler is waiting on. (Pyrogram client calls
+       made from those worker threads are marshalled back onto the loop
+       by pyrogram's own sync bridge — same as our job worker threads.)
+    2. Any exception the handler doesn't catch itself gets reported into
+       the chat instead of silently vanishing into the logs.
+    3. Defends against the same update being processed twice — e.g. two
        bot instances polling the same token after a redeploy that didn't
-       cleanly stop the old process. If we've seen this exact
-       message/callback within the last few seconds, skip it silently."""
-    import functools
+       cleanly stop the old process."""
+    import functools, asyncio
 
     @functools.wraps(fn)
-    def wrapper(client, update, *a, **kw):
+    async def wrapper(client, update, *a, **kw):
         key = _dedup_key(update)
         if key and not _mark_if_new(key):
             logger.warning(f"duplicate update suppressed in {fn.__name__}: {key}")
             return
+        loop = asyncio.get_running_loop()
         try:
-            return fn(client, update, *a, **kw)
+            await loop.run_in_executor(AZ_HANDLER_POOL, fn, client, update, *a, **kw)
         except Exception as e:
             logger.exception(f"handler {fn.__name__} raised")
             try:
                 chat_id = update.message.chat.id if hasattr(update, "message") and update.message else update.chat.id
             except Exception:
                 chat_id = None
+            try:
+                # Anchor the error report to whatever triggered this handler
+                # (the command message, or the message a callback button is
+                # attached to) — WZML-X-style: this Pyrogram fork has no
+                # message_thread_id param, so a plain send_message with no
+                # reply anchor lands in the group's General topic instead of
+                # the topic the error actually happened in.
+                anchor_msg_id = update.message.id if hasattr(update, "message") and update.message else update.id
+            except Exception:
+                anchor_msg_id = None
             if chat_id is not None:
                 try:
-                    client.send_message(chat_id, f"❌ Something went wrong (`{fn.__name__}`):\n`{str(e)[:300]}`")
+                    await client.send_message(chat_id, f"❌ Something went wrong (`{fn.__name__}`):\n`{str(e)[:300]}`",
+                                               reply_to_message_id=anchor_msg_id)
                 except Exception:
-                    logger.warning(f"couldn't even report error for {fn.__name__} to chat {chat_id}")
+                    # anchor_msg_id may itself be gone (deleted message) —
+                    # don't let that swallow the crash report entirely.
+                    try:
+                        await client.send_message(chat_id, f"❌ Something went wrong (`{fn.__name__}`):\n`{str(e)[:300]}`")
+                    except Exception:
+                        logger.warning(f"couldn't even report error for {fn.__name__} to chat {chat_id}")
             if hasattr(update, "answer"):  # CallbackQuery — clear the loading spinner
                 try:
-                    update.answer("❌ Error — see chat for details", show_alert=True)
+                    await update.answer("❌ Error — see chat for details", show_alert=True)
                 except Exception:
                     pass
     return wrapper
@@ -197,9 +241,7 @@ def bar(done, total, L=14):
     blocks = "█" * f + "░" * (L - f)
     return f"[{blocks}] {pct:.1f}%"
 
-# unify: the old bar(done,total) callers now get the same ▓ style
-def _bar_compat(done, total, L=14):
-    return pbar((done / total * 100) if total else 0, width=L)
+# (the old bar(done,total) helper was removed — callers use pbar/progress_line directly)
 
 def smooth_speed(samples):
     if len(samples) < 2:
@@ -209,7 +251,73 @@ def smooth_speed(samples):
         return "…"
     return fmtsz(max(0, (samples[-1][0] - samples[0][0]) / dt)) + "/s"
 
-# ── Throttled status-message editing ─────────────────────────────────────
+# ── Raw yt-dlp format selector passthrough ────────────────────────────────
+# Power users can append " -f <selector>" (yt-dlp's own -f/--format syntax,
+# e.g. "/l https://site/v -f 'bv*[height<=720]+ba'") to any leech/mirror
+# command. The selector is passed verbatim to yt-dlp's format option —
+# no shell, no interpolation. Not supported for IG/magnet/Drive-native
+# routes (those libraries have no format concept); -f only affects the
+# yt-dlp path and skips the quality picker when present.
+
+YTDLP_FMT_ARG_RE = re.compile(r"\s+(?:-f|--format)\s+(\"[^\"]+\"|'[^']+'|\S+)\s*$")
+
+def split_ytdlp_format(text):
+    """Strips a trailing ' -f <yt-dlp selector>' / '--format <sel>' from a
+    command payload. Returns (clean_text, selector_or_None)."""
+    m = YTDLP_FMT_ARG_RE.search(text or "")
+    if not m:
+        return text, None
+    sel = m.group(1).strip('"').strip("'").strip()
+    if len(sel) > 256:
+        return text, None
+    return text[:m.start()].rstrip(), sel or None
+
+
+# ── Forum-topic root resolution (thread anchoring without reply headers) ──
+# This pyrogram fork has no message_thread_id parameter, and a NEW message
+# without an anchor lands in a forum group's General topic. But every
+# message already inside a topic carries the topic's root id in its reply
+# header, which this fork exposes on the parsed Message as:
+#   reply_to_top_message_id  — set on REPLIES inside a topic = topic root
+#   reply_to_message_id      — for a DIRECT topic post this IS the topic
+#                              root (Telegram anchors every topic message
+#                              to its root message id)
+# Anchoring sends to that root places them in the topic as plain posts —
+# clients show NO reply header for replies to the topic root. PV messages
+# carry no header at all → returns 0 → caller sends unanchored, which is a
+# completely plain message. (v1 of this helper read message.raw, which
+# pyrogram's parsed Message doesn't have — so it silently returned 0 and
+# the archive landed in General. That's the bug this rewrite fixes.)
+
+def topic_root_id(message):
+    """0 when this message is not inside a forum topic (PV, normal group,
+    or a message with no reply context); otherwise the topic's root
+    message id, safe to pass as reply_to_message_id so sends land in the
+    topic WITHOUT a visible reply header."""
+    try:
+        from pyrogram.enums import ChatType
+        chat = getattr(message, "chat", None)
+        if chat is not None and getattr(chat, "type", None) == ChatType.PRIVATE:
+            return 0
+        top = getattr(message, "reply_to_top_message_id", None)
+        if top:
+            return int(top)
+        rid = getattr(message, "reply_to_message_id", None)
+        if rid:
+            return int(rid)
+    except Exception:
+        pass
+    return 0
+
+
+def file_anchor(message):
+    """The reply anchor for FILE sends: the forum topic's root (a reply to
+    the root renders as a PLAIN post inside the topic — no reply header),
+    or None everywhere else (PV, normal groups) so files are sent as plain
+    messages instead of replies to the command. Status bubbles keep
+    replying to the command; autoclean keeps using the raw command id."""
+    return topic_root_id(message) or None
+
 # Telegram allows ~1 edit/sec per chat; we coalesce rapid progress updates
 # so download/upload progress hooks (which fire many times a second) don't
 # get us flood-limited.
@@ -218,6 +326,7 @@ _lock = threading.Lock()
 _last_edit = {}
 _pending = {}
 _timers = {}
+_flood_until = {}   # key -> timestamp until which edits must wait out a FloodWait
 MIN_GAP = 2.5
 
 def throttled_edit(client, chat_id, msg_id, text, markup=None, force=False):
@@ -236,11 +345,20 @@ def throttled_edit(client, chat_id, msg_id, text, markup=None, force=False):
         try:
             client.edit_message_text(chat_id, msg_id, _text, reply_markup=_markup)
         except FloodWait as e:
-            time.sleep(e.value + 1)
-            try:
-                client.edit_message_text(chat_id, msg_id, _text, reply_markup=_markup)
-            except Exception:
-                pass
+            # FloodWait on an edit used to cascade: the old code SLEPT here
+            # inside the timer thread while newer throttled_edit calls kept
+            # scheduling fresh timers — every one of them fired into the
+            # same flood (N consecutive "Waiting 5s … EditMessage" warnings,
+            # each stalling the shared session and every queued
+            # SendMultiMedia behind it). Instead: block THIS message's edits
+            # until the flood expires and re-queue the text — one clean edit
+            # after the flood, newest text wins.
+            with _lock:
+                _flood_until[key] = time.time() + e.value + 1
+                _pending[key] = (_text, _markup)
+                t = threading.Timer(e.value + 1, _do)
+                _timers[key] = t
+                t.start()
         except MessageNotModified:
             pass
         except Exception as e:
@@ -251,13 +369,17 @@ def throttled_edit(client, chat_id, msg_id, text, markup=None, force=False):
     with _lock:
         now = time.time()
         gap = now - _last_edit.get(key, 0)
+        flood_left = _flood_until.get(key, 0) - now
         _pending[key] = (text, markup)
         existing = _timers.get(key)
         if existing:
             existing.cancel()
         delay = 0.05 if (force or gap >= MIN_GAP) else (MIN_GAP - gap + 0.05)
+        if flood_left > 0:
+            # A flood is active for this message — don't fire into it; the
+            # edit goes out right after Telegram stops rejecting it.
+            delay = max(delay, flood_left + 0.05)
         t = threading.Timer(delay, _do)
-        t.daemon = True
         _timers[key] = t
         t.start()
 
@@ -356,6 +478,21 @@ def fix_unknown_ext(fpath):
     except OSError:
         return fpath
 
+def split_dash_args(text):
+    """WZML-style raw passthrough: everything after a standalone '--' token
+    is a verbatim arg list for the underlying downloader binary
+    (gallery-dl, wget…). Example:
+        /gallery <url> -- --range 1-5 --verbose
+    → ('<url>', ['--range', '1-5', '--verbose'])
+    Using a bare '--' separator (standard CLI convention) keeps raw flags
+    unambiguous against rename (#folder) and | name grammar."""
+    parts = (text or "").split()
+    if "--" in parts:
+        i = parts.index("--")
+        return " ".join(parts[:i]), parts[i + 1:]
+    return text or "", []
+
+
 def zip_dir(src, out):
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
         for root, _, files in os.walk(src):
@@ -366,17 +503,64 @@ def zip_dir(src, out):
                 zf.write(fp, os.path.relpath(fp, src))
     return out
 
-def split_file(fpath, chunk_bytes):
-    parts = []
-    n = 1
+# Streaming granularity for iter_split_parts: pieces are read/written in
+# 8MB slices so RAM stays flat no matter how big the part (the old
+# implementation read an ENTIRE ≤2GB part into memory in one read() — a
+# guaranteed OOM kill on low-RAM hosts for any >2GB file).
+_SPLIT_IO_CHUNK = 8 * 1024 * 1024
+
+def iter_split_parts(fpath, chunk_bytes):
+    """Lazily yields byte-split part paths, keeping only ONE part on disk
+    at a time (the caller uploads then deletes each before asking for the
+    next). Streams off the source in 8MB pieces: constant RAM, constant
+    extra disk — the old pre-materialized `split_file` spiked both with
+    file size (2GB per part in RAM, every part on disk at once)."""
+    n = 0
     with open(fpath, "rb") as src:
         while True:
-            data = src.read(chunk_bytes)
-            if not data:
-                break
-            pp = f"{fpath}.part{n:03d}"
-            with open(pp, "wb") as dst:
-                dst.write(data)
-            parts.append(pp)
             n += 1
-    return parts
+            pp = f"{fpath}.part{n:03d}"
+            wrote = 0
+            with open(pp, "wb") as dst:
+                while wrote < chunk_bytes:
+                    piece = src.read(min(_SPLIT_IO_CHUNK, chunk_bytes - wrote))
+                    if not piece:
+                        break
+                    dst.write(piece)
+                    wrote += len(piece)
+            if wrote == 0:   # exact-multiple edge: no empty trailing part
+                try:
+                    os.remove(pp)
+                except OSError:
+                    pass
+                return
+            yield pp
+
+
+def file_md5(fpath, chunk=4 * 1024 * 1024):
+    """MD5 of a file, streamed (4MB chunks — flat RAM on any size)."""
+    h = hashlib.md5()
+    with open(fpath, "rb") as fh:
+        for piece in iter(lambda: fh.read(chunk), b""):
+            h.update(piece)
+    return h.hexdigest()
+
+
+def zip_tail_ok(fpath, tail=131072):
+    """True if the file ends with a zip End-Of-Central-Directory record
+    (classic or zip64). A split source without it is already truncated —
+    every part produced from it will reassemble into an unopenable zip."""
+    try:
+        size = os.path.getsize(fpath)
+        with open(fpath, "rb") as fh:
+            fh.seek(max(0, size - tail))
+            buf = fh.read(tail)
+            # PK\x05\x06 = classic EOCD; PK\x06\x06 = zip64 EOCD record;
+            # PK\x06\x07 = zip64 EOCD locator (big >4GB archives carry the
+            # zip64 structures; checking only the classic signature
+            # false-rejects healthy large zips as "truncated").
+            return (b"PK\x05\x06" in buf
+                    or b"PK\x06\x06" in buf
+                    or b"PK\x06\x07" in buf)
+    except OSError:
+        return False

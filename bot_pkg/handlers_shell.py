@@ -313,13 +313,17 @@ class ShellSession:
             pass
         if reason:
             try:
-                self.client.send_message(self.chat_id, reason)
+                # Anchor to self.canvas (the live shell message, already in
+                # the right forum topic) — WZML-X-style, same convention as
+                # every other new-message send in this bot.
+                self.client.send_message(self.chat_id, reason, reply_to_message_id=self.canvas)
             except Exception:
                 pass
 
 
 SESSIONS = {}   # chat_id -> ShellSession
 _sess_lock = threading.Lock()
+_shell_warned = set()   # chats already told their text is eaten by an open shell
 
 
 def shell_feed_or_none(client, chat_id, user_id, text):
@@ -333,7 +337,15 @@ def shell_feed_or_none(client, chat_id, user_id, text):
         _drop(chat_id)
         return False
     if not _is_admin_user(user_id):
-        # Other authorized users in the same chat must not drive the shell.
+        # Other authorized users in the same chat must not drive the shell —
+        # but tell them ONCE per session instead of silently eating their
+        # leech links (messages used to vanish without any feedback).
+        if chat_id not in _shell_warned:
+            _shell_warned.add(chat_id)
+            try:
+                client.send_message(chat_id, "⚠️ A shell session is open in this chat — your message was ignored. Close it with /shexit or send your link elsewhere.")
+            except Exception:
+                pass
         return True  # swallow rather than leeching into someone's terminal
     ok = sess.feed(text)
     if not ok:
@@ -343,7 +355,13 @@ def shell_feed_or_none(client, chat_id, user_id, text):
 
 def _drop(chat_id):
     with _sess_lock:
-        SESSIONS.pop(chat_id, None)
+        sess = SESSIONS.pop(chat_id, None)
+    _shell_warned.discard(chat_id)
+    if sess is not None:
+        try:
+            sess.stop("dropped")
+        except Exception:
+            pass
 
 
 def register_shell_handlers(app, AdminOnly, guarded, on_one_shot):

@@ -1,11 +1,11 @@
 import os, re, shutil, subprocess, time, threading
 
-from pyrogram import filters
+from pyrogram import filters, enums
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from . import config, state, drive, log
 from .core import app
-from .utils import new_task_id, throttled_edit, autoclean_if_enabled, guarded, safe_edit, esc, progress_line, fmt_time
+from .utils import new_task_id, throttled_edit, autoclean_if_enabled, guarded, safe_edit, esc, fmt_time, topic_root_id
 from .dispatcher import LiveDispatcher
 from .handlers_core import Authorized, cancel_kb
 
@@ -30,6 +30,36 @@ ARCHIVE_LABEL = {
     "posts": "🖼 Posts", "reels": "🎬 Reels", "stories": "⏳ Stories",
     "highlights": "⭐ Highlights", "tagged": "🏷 Tagged",
 }
+
+# Ported from the older (Bot-API, non-Pyrogram) version of this bot, whose
+# gallery-dl invocation was noticeably more reliable at not getting
+# rate-limited/blocked by Instagram mid-archive. It ran gallery-dl in-process
+# via its Python API with these settings applied through gdl_config.set(...);
+# we still shell out to the gallery-dl CLI as a separate subprocess (keeps
+# gallery-dl's own memory footprint OS-managed and freed the moment each job
+# ends, rather than permanently resident inside this long-running bot
+# process — worth preserving given how tight memory already is on small
+# hosts), so the same tuning is passed as -o KEY=VALUE overrides instead.
+GDL_TUNING_ARGS = [
+    "-o", "downloader.retries=6",
+    "-o", "downloader.timeout=30",
+    "-o", "downloader.part=true",
+    "-o", "downloader.part-filter=true",
+    "-o", "extractor.retries=6",
+    "-o", "extractor.timeout=30",
+    "-o", "extractor.instagram.sleep-request=1.5",
+    "-o", "extractor.sleep-extractor=1.0",
+    "-o", "extractor.instagram.videos=true",
+    "-o", 'extractor.instagram.headers={"User-Agent": '
+          '"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+          '(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36", '
+          '"Accept-Language": "en-US,en;q=0.9", '
+          '"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}',
+]
+# Small pacing gap between archive types (posts → reels → stories → …) so a
+# multi-type run doesn't look like one continuous burst of requests to
+# Instagram — same spirit as the older bot's 1s gap between phases.
+GDL_INTER_TYPE_PAUSE_S = 1.0
 
 
 def dispatch_instagram(client, message, url, dest):
@@ -98,10 +128,11 @@ def cmd_ig(client, message):
 @app.on_message(filters.command(["igindex", "igindexes"]) & Authorized)
 @guarded
 def cmd_igindex(client, message):
-    _send_index_manager(message.chat.id)
+    reply_to = message.id if message.chat.type != enums.ChatType.PRIVATE else None
+    _send_index_manager(message.chat.id, reply_to=reply_to)
 
 
-def _send_index_manager(chat_id, edit_msg=None):
+def _send_index_manager(chat_id, edit_msg=None, reply_to=None):
     entries = state.list_ig_indexes()
     total_kb = 0
     lines = []
@@ -117,7 +148,7 @@ def _send_index_manager(chat_id, edit_msg=None):
     for u in sorted(by_user):
         types = ", ".join(f"{ARCHIVE_LABEL.get(t, t)}: {n}" for t, n in by_user[u])
         lines.append(f"• <b>{esc(u)}</b> — {types}")
-    text = (f"🗂 <b>Instagram indexes</b>\n\n"
+    text = ("🗂 <b>Instagram indexes</b>\n\n"
             + ("\n".join(lines) if lines else "_No indexes yet — they're created on your first /ig archive._")
             + f"\n\nTotal: {len(entries)} ledger(s), ~{total_kb} KB • shared across chats, mirrored to Drive")
 
@@ -130,7 +161,9 @@ def _send_index_manager(chat_id, edit_msg=None):
     if edit_msg is not None:
         safe_edit(app, chat_id, edit_msg, text, reply_markup=kb)
     else:
-        app.send_message(chat_id, text, reply_markup=kb)
+        # reply_to anchors this into the right forum topic (WZML-X-style —
+        # see the note on _launch_status_and_job in handlers_core.py).
+        app.send_message(chat_id, text, reply_markup=kb, reply_to_message_id=reply_to)
 
 
 @app.on_callback_query(filters.regex(r"^igidx$"))
@@ -221,182 +254,317 @@ def cb_ig_start(client, cq):
         return cq.message.reply_text("❌ Disk full.")
 
     chat_id = cq.message.chat.id
-    for archive_type in types:
-        task_id = new_task_id()
-        status = cq.message.reply_text(
-            f"⚡ Queued <code>{esc(archive_type)}</code> for @{esc(username)} — <code>{esc(task_id)}</code>",
-            reply_markup=cancel_kb(task_id))
-        task_dir = os.path.join(config.DOWNLOAD_DIR, task_id)
-        state.register_job(task_id, chat_id, status.id, f"ig:{archive_type}", task_dir)
-        state.task_queue.put((run_ig_archive_job,
-                               (client, chat_id, status.id, archive_type, username, task_id, dest)))
+    # One status message + one Cancel button for the WHOLE selection, not
+    # one per archive type — previously each type got its own message and
+    # its own fully-independent job, which also meant several gallery-dl
+    # subprocesses + LiveDispatchers running at once (see the resource/OOM
+    # note that used to be here). run_ig_multi_archive_job now runs every
+    # selected type sequentially, in a single job, updating this one
+    # message throughout and rolling everything into one final summary.
+    task_id = new_task_id()
+    # Topic anchoring WITHOUT a visible reply header: resolve the forum
+    # topic's ROOT id from the picker message (which lives in the topic),
+    # then anchor every send (status, files, summary) to it. Telegram
+    # renders replies-to-topic-root as plain posts inside that topic —
+    # so in topics everything lands IN the thread, and in PV (no topic
+    # header) anchor resolves to 0 and every send is completely plain.
+    # This replaces pass #4's "no anchoring at all", which dropped the
+    # status message and live view into the forum's General topic.
+    anchor = topic_root_id(cq.message)
+    status = client.send_message(
+        chat_id,
+        f"⚡ Queued <b>{esc(', '.join(types))}</b> for @{esc(username)} — <code>{esc(task_id)}</code>",
+        reply_markup=cancel_kb(task_id), reply_to_message_id=anchor or None)
+    task_dir = os.path.join(config.DOWNLOAD_DIR, task_id)
+    state.register_job(task_id, chat_id, status.id, f"ig:{'+'.join(types)}", task_dir)
+    # Both scaffolding messages (the edited picker "Queued…" reply and the
+    # job status/live-view message) get DELETED once the job completes and
+    # the final summary is sent — the chat is left with just the files and
+    # the summary. The picker's id is threaded through for that cleanup.
+    state.task_queue.put((run_ig_multi_archive_job,
+                           (client, chat_id, status.id, username, types, task_id, dest,
+                            anchor, cq.message.id)))
 
 
-def run_ig_archive_job(client, chat_id, msg_id, archive_type, username, task_id, dest):
+def run_ig_multi_archive_job(client, chat_id, msg_id, username, types, task_id, dest,
+                             anchor=0, picker_msg_id=None):
+    """Archives every selected type for one profile, one type at a time
+    (bounded resource use — see cb_ig_start), reporting combined live
+    progress and a single combined completion summary on ONE message.
+    anchor = forum topic root id (0 for non-topic chats) — every send
+    (files, summary) is anchored to it, landing in the thread as a plain
+    post instead of a reply or a General-topic orphan."""
     task_dir = os.path.join(config.DOWNLOAD_DIR, task_id)
     os.makedirs(task_dir, exist_ok=True)
     cookie_file = state.active_cookie_file(chat_id)
-    disp = None
-    full_log = []
+    t_start = time.time()
+    icon = {"posts": "📸", "stories": "📖", "reels": "🎬",
+            "highlights": "⭐", "tagged": "🏷️"}
+    per_type = {}       # archive_type -> {downloaded, uploaded, bytes, errors, note}
+    total_errors = []
+    cancelled = False
+    disp = None         # current type's LiveDispatcher (for error-path cleanup)
+    cur = [None]        # archive_type currently being fetched
+    live_disp = [None]  # its dispatcher (live ↓/☁ counts read straight off it)
+
+    def _live_text(current_type=None, extra=""):
+        """ONE live view for the whole run, exactly the format requested:
+        the per-type block IS the progress — every line updates in place
+        (↓ = downloaded, ⏭ = skipped, ☁ = uploaded, ⏳ = pending, live
+        counts during the current type). Totals row underneath. No per-file
+        progress bars. ↓/☁ counts come from the dispatcher itself (files it
+        picked up off disk / files it finished sending) — not from parsing
+        gallery-dl stdout, whose format was the source of the old "0 new
+        files but 79 uploaded" contradiction."""
+        lines = [f"📷 <b>@{esc(username)}</b> archive"]
+        if current_type and extra:
+            lines.append(extra)
+        lines.append("")
+        for t in types:
+            st = per_type.get(t)
+            ic = icon.get(t, "📷")
+            if t == current_type:
+                ld = live_disp[0]
+                lines.append(f"{ic} <b>{t.title()}</b>: <code>{len(ld.seen) if ld else 0}</code> ↓ • "
+                             f"<code>{ld.sent if ld else 0}</code> ☁️")
+            elif st:
+                if st.get("note") and not st["uploaded"]:
+                    lines.append(f"{ic} {t.title()}: {esc(st['note'])}")
+                else:
+                    lines.append(f"{ic} {t.title()}: <code>{st['downloaded']}</code> ↓ • "
+                                 f"<code>{st.get('skipped', 0)}</code> ⏭️ • <code>{st['uploaded']}</code> ☁️")
+            else:
+                lines.append(f"{ic} {t.title()}: ⏳")
+        cur_d = len(live_disp[0].seen) if (current_type and live_disp[0]) else 0
+        cur_u = live_disp[0].sent if (current_type and live_disp[0]) else 0
+        lines.append("")
+        lines.append(f"Σ <code>{sum(s['downloaded'] for s in per_type.values()) + cur_d}</code> ↓ • "
+                     f"☁️ <code>{sum(s['uploaded'] for s in per_type.values()) + cur_u}</code> • "
+                     f"⏭️ <code>{sum(s.get('skipped', 0) for s in per_type.values())}</code>")
+        return "\n".join(lines)
+
+    def _edit_live(current_type=None, extra="", force=False):
+        throttled_edit(client, chat_id, msg_id, _live_text(current_type, extra),
+                       markup=cancel_kb(task_id), force=force)
+
     try:
-        # Validate BEFORE creating the dispatcher — otherwise an early return
-        # below would leak the dispatcher's watcher thread and leave a ghost
-        # entry in ACTIVE_JOBS forever.
-        if archive_type in ("stories", "highlights") and not cookie_file:
-            state.drop_job(task_id)
-            shutil.rmtree(task_dir, ignore_errors=True)
-            return throttled_edit(client, chat_id, msg_id,
-                                   "❌ Stories/Highlights need a cookie profile — set one with <code>/cookie</code>.",
-                                   force=True)
         if not shutil.which("gallery-dl"):
-            state.drop_job(task_id)
-            shutil.rmtree(task_dir, ignore_errors=True)
             return throttled_edit(client, chat_id, msg_id,
                                    "❌ <code>gallery-dl</code> isn't installed on this host.", force=True)
 
-        # Drive delivery: sort by type inside Instagram/<username>/<type>/
-        drive_folder = None
-        if dest == "drive" and drive.enabled():
-            drive_folder = f"Instagram/{username}/{archive_type}"
+        for archive_type in types:
+            if state.is_cancelled(task_id):
+                cancelled = True
+                break
 
-        # Index ledger lives LOCALLY per (chat, user, type): data/indexes/<chat>/…
-        # gallery-dl's --download-archive dedup keeps re-runs incremental, and
-        # /igindex can wipe any of them independently.
-        archive_db = state.index_path(chat_id, username, archive_type)
-        # Fresh deploy with an empty data/: restore the ledger from the Drive
-        # datastore BEFORE handing it to gallery-dl — otherwise it would start
-        # blank and re-download (duplicate) everything already archived.
-        if not os.path.exists(archive_db):
+            if archive_type in ("stories", "highlights") and not cookie_file:
+                per_type[archive_type] = {"downloaded": 0, "uploaded": 0, "bytes": 0, "errors": [],
+                                          "note": "needs a cookie profile"}
+                continue
+
+            type_dir = os.path.join(task_dir, archive_type)
+            os.makedirs(type_dir, exist_ok=True)
+
+            drive_folder = None
+            if dest == "drive" and drive.enabled():
+                drive_folder = f"Instagram/{username}/{archive_type}"
+
+            archive_db = state.index_path(chat_id, username, archive_type)
+            if not os.path.exists(archive_db):
+                try:
+                    from . import datastore
+                    datastore.pull_index(chat_id, username, archive_type, archive_db)
+                except Exception as e:
+                    logger.warning(f"[{task_id}] index restore from Drive skipped: {e}")
+
+            url = ARCHIVE_URLS[archive_type].format(u=username)
+            args = ["gallery-dl", "--dest", type_dir, "--download-archive", archive_db]
+            args += GDL_TUNING_ARGS
+            if cookie_file:
+                args += ["--cookies", cookie_file]
+            args.append(url)
+
+            # Files land in the thread as plain posts: anchored to the
+            # topic ROOT (no visible reply header), never to the bot's own
+            # status message (no threaded replies). PV: anchor=0 → plain.
+            # max_workers=2: gallery-dl DOWNLOADS stay sequential (Instagram
+            # rate limits — parallel fetches are how accounts get blocked),
+            # but UPLOADS are independent of that and can run 2-wide (IG
+            # items are mostly small images; big reels stay RAM-gated).
+            disp = LiveDispatcher(client, chat_id, msg_id, type_dir, dest, reply_to=anchor or None,
+                                   task_id=task_id, folder=drive_folder,
+                                   caption_prefix=f"{icon.get(archive_type, '📷')} {archive_type.title()}",
+                                   quiet=True, max_workers=2,
+                                   on_sent=lambda fp, fs: _edit_live(cur[0]))
+
+            logger.info(f"[{task_id}] /ig {archive_type} for @{username} starting (dest={dest})")
+            cur[0] = archive_type
+            live_disp[0] = disp
+            per_type[archive_type] = {"downloaded": 0, "uploaded": 0, "bytes": 0,
+                                      "errors": [], "skipped": 0}
+            _edit_live(archive_type, force=True)
+            proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                     universal_newlines=True, bufsize=1)
+            state.attach_proc(task_id, proc)
+
+            last_activity = [time.time()]
+            stalled = threading.Event()
+
+            def _watchdog(proc=proc, last_activity=last_activity, stalled=stalled):
+                while proc.poll() is None:
+                    if state.is_cancelled(task_id):
+                        return
+                    if time.time() - last_activity[0] > config.STALL_TIMEOUT_S:
+                        stalled.set()
+                        logger.warning(f"[{task_id}] /ig stalled — no output for {config.STALL_TIMEOUT_S}s, stopping")
+                        try:
+                            proc.terminate()
+                            proc.wait(timeout=5)
+                        except Exception:
+                            try:
+                                proc.kill()
+                            except Exception:
+                                pass
+                        return
+                    time.sleep(5)
+
+            threading.Thread(target=_watchdog, daemon=True).start()
+
+            full_log = []
+            last_count = [0]
+            try:
+                for line in iter(proc.stdout.readline, ""):
+                    last_activity[0] = time.time()
+                    if state.is_cancelled(task_id):
+                        break
+                    full_log.append(line.rstrip())
+                    # live view refresh driven by the DISPATCHER's seen-count
+                    # (files landed on disk), not by stdout parsing
+                    if len(disp.seen) != last_count[0]:
+                        last_count[0] = len(disp.seen)
+                        _edit_live(archive_type)
+            except (AttributeError, ValueError):
+                pass  # stdout closed by /cancel teardown — expected
+            proc.wait()
+
+            if stalled.is_set():
+                disp.stop()
+                mins = config.STALL_TIMEOUT_S // 60
+                per_type[archive_type] = {"downloaded": len(disp.seen), "uploaded": 0, "bytes": 0, "errors": [],
+                                          "skipped": 0, "note": f"stalled — no progress for {mins}m"}
+                continue
+
+            if state.is_cancelled(task_id):
+                disp.stop()
+                cancelled = True
+                break
+
+            _edit_live(archive_type, extra="⬆️ uploading new files…", force=True)
+            sent, errors = disp.finalize(timeout=1800)
+
+            if state.is_cancelled(task_id):
+                cancelled = True
+                break
+
+            # "downloaded" = files the dispatcher actually picked up off disk
+            # (gallery-dl also downloads already-archived items' metadata without
+            # producing files, which stdout counting over-reported).
+            downloaded = len(disp.seen)
+            skipped = max(downloaded - sent, 0)
+            note = None
+            if sent == 0 and downloaded == 0:
+                tail = "\n".join(full_log[-10:])
+                note = "nothing new"
+                if "error" in tail.lower() or "403" in tail or "login" in tail.lower():
+                    note = "fetch failed — may need a fresh cookie"
+            elif sent == 0 and downloaded > 0:
+                note = f"{downloaded} file(s) failed to send"
+            per_type[archive_type] = {"downloaded": downloaded, "uploaded": sent,
+                                      "bytes": getattr(disp, "bytes_sent", 0),
+                                      "errors": errors, "skipped": skipped, "note": note}
+            total_errors.extend(errors)
+            cur[0] = None
+            live_disp[0] = None
+            _edit_live(force=True)
+
             try:
                 from . import datastore
-                datastore.pull_index(chat_id, username, archive_type, archive_db)
+                datastore.push_index(chat_id, username, archive_type)
             except Exception as e:
-                logger.warning(f"[{task_id}] index restore from Drive skipped: {e}")
+                logger.warning(f"index Drive-mirror failed: {e}")
 
-        url = ARCHIVE_URLS[archive_type].format(u=username)
-        args = ["gallery-dl", "--dest", task_dir, "--download-archive", archive_db]
-        if cookie_file:
-            args += ["--cookies", cookie_file]
-        args.append(url)
+            # Small gap before the next type (ported from the older bot) —
+            # otherwise switching straight from one type's requests into the
+            # next looks like one continuous burst to Instagram, raising the
+            # odds of a rate-limit/block partway through a multi-type run.
+            if archive_type != types[-1]:
+                time.sleep(GDL_INTER_TYPE_PAUSE_S)
 
-        disp = LiveDispatcher(client, chat_id, msg_id, task_dir, dest, task_id=task_id,
-                               folder=drive_folder)
-
-        logger.info(f"[{task_id}] /ig {archive_type} for @{username} starting (dest={dest})")
-        proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                 universal_newlines=True, bufsize=1)
-        state.attach_proc(task_id, proc)
-
-        last_activity = [time.time()]
-        stalled = threading.Event()
-
-        def _watchdog():
-            while proc.poll() is None:
-                if state.is_cancelled(task_id):
-                    return
-                if time.time() - last_activity[0] > config.STALL_TIMEOUT_S:
-                    stalled.set()
-                    logger.warning(f"[{task_id}] /ig stalled — no output for {config.STALL_TIMEOUT_S}s, stopping")
-                    try:
-                        proc.terminate()
-                        proc.wait(timeout=5)
-                    except Exception:
-                        try:
-                            proc.kill()
-                        except Exception:
-                            pass
-                    return
-                time.sleep(5)
-
-        threading.Thread(target=_watchdog, daemon=True).start()
-
-        last_edit = 0.0
-        stats = {"downloaded": 0, "uploaded": 0}
-        t_start = time.time()
-        try:
-            for line in iter(proc.stdout.readline, ""):
-                last_activity[0] = time.time()
-                if state.is_cancelled(task_id):
-                    break
-                full_log.append(line.rstrip())
-                # gallery-dl emits "Last-Modified: ... Downloaded: N" style
-                # counters per item; count real downloads for the progress
-                # display (WZML-X-style live counter + bar).
-                low = line.lower()
-                if "downloaded" in low or line.strip().startswith("./"):
-                    stats["downloaded"] += 1
-                now = time.time()
-                if now - last_edit >= 2:
-                    last_edit = now
-                    el = now - t_start
-                    rate = stats["downloaded"] / max(el, 1)
-                    throttled_edit(
-                        client, chat_id, msg_id,
-                        f"📷 <b>@{esc(username)}</b> — {esc(archive_type)}\n"
-                        f"{progress_line('⬇️', stats['downloaded'], 0)}\n"
-                        f"📥 {stats['downloaded']} fetched • ⚡ {rate:.1f}/s • ⏱ {fmt_time(el)}",
-                        markup=cancel_kb(task_id))
-        except (AttributeError, ValueError):
-            pass  # stdout closed by /cancel teardown — expected
-        proc.wait()
-
-        if stalled.is_set():
-            disp.stop()
-            mins = config.STALL_TIMEOUT_S // 60
-            return throttled_edit(
-                client, chat_id, msg_id,
-                f"⏱️ Stopped — no progress for {mins} minutes fetching @{esc(username)} ({archive_type}). "
-                f"Instagram may be rate-limiting or blocking the request.",
-                force=True,
-            )
-
-        if state.is_cancelled(task_id):
-            disp.stop()
-            return throttled_edit(client, chat_id, msg_id, "🛑 Cancelled.", force=True)
-
-        # Upload phase with its own live counter (old-bot style)
-        stats["uploaded"] = 0
-        t_up = time.time()
-        throttled_edit(client, chat_id, msg_id, "☁️ Uploading results…", markup=cancel_kb(task_id), force=True)
-        sent, errors = disp.finalize(timeout=1800)
-
-        if state.is_cancelled(task_id):
-            return throttled_edit(client, chat_id, msg_id, "🛑 Cancelled.", force=True)
-
-        if sent == 0:
-            msg = f"ℹ️ Nothing new to fetch for @{esc(username)} ({archive_type})."
-            tail = "\n".join(full_log[-10:])
-            if "error" in tail.lower() or "403" in tail or "login" in tail.lower():
-                msg = f"❌ Couldn't fetch @{esc(username)} ({archive_type}) — may need a fresh cookie.\n<pre>{esc(tail[-1200:])}</pre>"
-            return throttled_edit(client, chat_id, msg_id, msg, force=True)
-
+        # ── ONE completion summary — same block the live view showed, ────
+        # finalized. Sent as a NEW plain message (no reply) per request;
+        # the status message is left showing the last live view.
         elapsed = int(time.time() - t_start)
-        skipped = max(stats["downloaded"] - sent, 0)
-        icon = {"posts": "📸", "stories": "📖", "reels": "🎬",
-                "highlights": "⭐", "tagged": "🏷️"}.get(archive_type, "📷")
-        summary = (f"✅ <b>@{esc(username)} archive complete!</b>\n\n"
-                   f"📥 {stats['downloaded']} new files\n"
-                   f"☁️ {sent} uploaded\n"
-                   f"⏭️ {skipped} skipped\n"
-                   f"{f'⚠️ {len(errors)} failed\n' if errors else ''}"
-                   f"⏱️ {fmt_time(elapsed)}\n"
-                   f"{icon} {esc(archive_type.title())}: {stats['downloaded']} ↓ • "
-                   f"{skipped} ⏭️ • {sent} ☁️\n"
-                   f"→ {config.DEST_LABEL[dest]}")
-        if dest == "drive":
-            summary += f"\n📁 Instagram/{esc(username)}/{esc(archive_type)}"
-        throttled_edit(client, chat_id, msg_id, summary, force=True)
-        # Mirror the (updated) index ledger into the Drive datastore.
+        total_downloaded = sum(st["downloaded"] for st in per_type.values())
+        total_uploaded = sum(st["uploaded"] for st in per_type.values())
+        total_bytes = sum(st.get("bytes", 0) for st in per_type.values())
+        total_skipped = sum(st.get("skipped", 0) for st in per_type.values())
+
+        if cancelled:
+            header = "🛑 <b>Cancelled</b>"
+        elif total_uploaded == 0 and not any(st.get("note") for st in per_type.values() if st.get("note") != "needs a cookie profile"):
+            header = f"ℹ️ <b>Nothing new for @{esc(username)}</b>"
+        else:
+            header = f"✅ <b>@{esc(username)} archive complete!</b>"
+
+        lines = [header, ""]
+        if total_downloaded or total_uploaded or total_bytes:
+            from .utils import fmtsz
+            lines += [
+                f"📥 <code>{total_downloaded}</code> downloaded",
+                f"☁️ <code>{total_uploaded}</code> uploaded",
+            ]
+            if total_bytes:
+                lines.append(f"📦 <code>{fmtsz(total_bytes)}</code>")
+            lines.append(f"⏭️ <code>{total_skipped}</code> skipped")
+            if total_errors:
+                lines.append(f"⚠️ <code>{len(total_errors)}</code> failed")
+            lines.append(f"⏱ {fmt_time(elapsed)}")
+            lines.append("")
+        for t in types:
+            st = per_type.get(t)
+            if not st:
+                continue
+            if st.get("note") and not st["uploaded"]:
+                lines.append(f"{icon.get(t,'📷')} {t.title()}: {esc(st['note'])}")
+            else:
+                lines.append(f"{icon.get(t,'📷')} {t.title()}: <code>{st['downloaded']}</code> ↓ • "
+                             f"<code>{st.get('skipped', 0)}</code> ⏭️ • <code>{st['uploaded']}</code> ☁️")
+        lines.append(f"→ {config.DEST_LABEL[dest]}")
+
         try:
-            from . import datastore
-            datastore.push_index(chat_id, username, archive_type)
+            client.send_message(chat_id, "\n".join(lines), reply_to_message_id=anchor or None)
         except Exception as e:
-            logger.warning(f"index Drive-mirror failed: {e}")
+            logger.warning(f"summary send failed, falling back to status edit: {e}")
+            throttled_edit(client, chat_id, msg_id, "\n".join(lines), force=True)
+        else:
+            # job done — the two scaffolding messages (Queued… reply and the
+            # live-view status) are no longer needed; the summary above is
+            # the permanent record. Left in place on the error path so
+            # failures stay visible.
+            for dmid in {i for i in (msg_id, picker_msg_id) if i}:
+                try:
+                    client.delete_messages(chat_id, [dmid])
+                except Exception:
+                    pass
         autoclean_if_enabled(client, chat_id, msg_id, None, dest)
 
     except Exception as e:
         logger.exception(f"[{task_id}] /ig job failed")
         throttled_edit(client, chat_id, msg_id, f"❌ <code>{esc(str(e)[:300])}</code>", force=True)
     finally:
+        if disp is not None:
+            # no-op when finalize() already stopped it; on an error exit the
+            # watcher thread would otherwise spin forever over a deleted dir
+            disp.stop()
         state.drop_job(task_id)
         shutil.rmtree(task_dir, ignore_errors=True)

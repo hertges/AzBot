@@ -90,17 +90,29 @@ def get_as_document(chat_id):
 def set_as_document(chat_id, value):
     set_pref(chat_id, "as_document", bool(value))
 
+def get_media_group(chat_id):
+    """WZML-X MEDIA_GROUP parity: photo albums (≤10 per send) on/off.
+    Default ON — one group send replaces ten individual sends."""
+    return bool(get_prefs(chat_id).get("media_group", True))
+
+def set_media_group(chat_id, value):
+    set_pref(chat_id, "media_group", bool(value))
+
 # ── Drive account selection (multi-account) ─────────────────────────────
 # Accounts themselves come from env (config.DRIVE_ACCOUNTS). Per chat we
 # store which one to use; default is the first configured account.
 DEFAULT_ACCOUNT = next(iter(config.DRIVE_ACCOUNTS), None)
 
 def get_drive_account(chat_id):
-    name = get_prefs(chat_id).get("drive_account") or DEFAULT_ACCOUNT
-    if name not in config.DRIVE_ACCOUNTS:
-        name = DEFAULT_ACCOUNT
-        if name:
-            set_pref(chat_id, "drive_account", name)
+    name = get_prefs(chat_id).get("drive_account")
+    if name in config.DRIVE_ACCOUNTS:
+        return name
+    # Stored/default account is gone (env changed, override removed):
+    # fall back to any LIVE account instead of a dead name that every
+    # caller maps to None (opaque upload/browser failures).
+    name = next(iter(config.DRIVE_ACCOUNTS), None)
+    if name:
+        set_pref(chat_id, "drive_account", name)
     return name
 
 def set_drive_account(chat_id, name):
@@ -134,14 +146,30 @@ def ig_index_exists(chat_id, username, archive_type):
     return False
 
 def list_ig_indexes():
-    """[(username, type), ...] found on the bot."""
-    out = []
+    """[(username, type), ...] — local ledgers, PLUS any that exist only in
+    the Drive datastore (synced down on demand). The local-only listing was
+    the /igindex bug: after a redeploy, ledgers that no archive run had
+    pulled yet were invisible even though they existed in AzBotData/indexes."""
+    out = set()
     if os.path.isdir(config.INDEX_DIR):
         for f in sorted(os.listdir(config.INDEX_DIR)):
             m = re.match(r"^(.+)\.(posts|reels|stories|highlights|tagged)\.txt$", f)
             if m:
-                out.append((m.group(1), m.group(2)))
-    return out
+                out.add((m.group(1), m.group(2)))
+    # pull remote-only ledgers down (pull_index is a no-op when local exists)
+    try:
+        from . import datastore
+        for name in datastore.list_remote_files("indexes"):
+            m = re.match(r"^(.+)\.(posts|reels|stories|highlights|tagged)\.txt$", name)
+            if not m:
+                continue
+            u, t = m.group(1), m.group(2)
+            if (u, t) not in out:
+                datastore.pull_index(None, u, t, index_path(None, u, t))
+                out.add((u, t))
+    except Exception:
+        pass
+    return sorted(out)
 
 def delete_ig_index(username=None, archive_type=None):
     """Deletes matching ledgers (local + Drive mirror). All args None → wipe
@@ -213,72 +241,6 @@ def restore_cookies():
                 n += 1
     except Exception as e:
         logger.warning(f"cookie restore skipped: {e}")
-    return n
-
-# ── Custom thumbnails (opt-in; videos ALWAYS get an auto frame-grab) ─────
-def thumb_path(chat_id):
-    p = os.path.join(config.THUMBS_DIR, f"{chat_id}.jpg")
-    os.makedirs(config.THUMBS_DIR, exist_ok=True)
-    return p
-
-def get_thumb(chat_id):
-    """Only returns a user-set thumb if the FILE exists — never creates
-    anything, and THUMBS_DIR itself is only made by /setthumb."""
-    p = os.path.join(config.THUMBS_DIR, f"{chat_id}.jpg")
-    return p if os.path.exists(p) else None
-
-def set_thumb(chat_id, src_image):
-    """Normalizes any incoming image to a ≤320px JPEG thumbnail and mirrors
-    it to the Drive datastore. Returns the stored path."""
-    import subprocess
-    dst = thumb_path(chat_id)
-    try:
-        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", src_image,
-                        "-vf", "scale='min(320,iw)':-2", "-frames:v", "1", dst],
-                       capture_output=True, timeout=30, check=True)
-    except Exception:
-        # not an image ffmpeg can decode — copy as-is only if it's jpg-sized
-        shutil.copyfile(src_image, dst)
-    try:
-        from . import datastore
-        import threading as _th
-        _th.Thread(target=datastore.push_datafile,
-                   args=(dst, f"thumbs/{os.path.basename(dst)}"), daemon=True).start()
-    except Exception:
-        pass
-    logger.info(f"custom thumb set for chat {chat_id}")
-    return dst
-
-def delete_thumb(chat_id):
-    p = thumb_path(chat_id)
-    removed = False
-    if os.path.exists(p):
-        os.remove(p)
-        removed = True
-    try:
-        from . import datastore
-        import threading as _th
-        _th.Thread(target=datastore.delete_remote_datafile,
-                   args=(f"thumbs/{os.path.basename(p)}",), daemon=True).start()
-    except Exception:
-        pass
-    return removed
-
-def restore_thumbs():
-    """Boot-time: pull user-set thumbs missing locally. Skips silently when
-    no thumbs folder exists remotely (no Drive chatter for unused feature)."""
-    n = 0
-    try:
-        from . import datastore
-        if not datastore.remote_dir_exists("thumbs"):
-            return 0
-        os.makedirs(config.THUMBS_DIR, exist_ok=True)
-        for fname in datastore.list_remote_files("thumbs"):
-            local = os.path.join(config.THUMBS_DIR, fname)
-            if not os.path.exists(local) and datastore.pull_datafile(f"thumbs/{fname}", local):
-                n += 1
-    except Exception as e:
-        logger.warning(f"thumb restore skipped: {e}")
     return n
 
 # ── Duplicate-task guard (WZML-X parity: same link ≠ second download) ────
@@ -356,6 +318,44 @@ def pop_awaiting_input(chat_id):
         return None
     return kind, target
 
+# ── /unzipmulti collection session (explicit multi-file unzip) ───────────
+# chat_id -> {"dest": "telegram"/"drive", "folder": ..., "msgs": [(msg), ...],
+#             "status_id": int, "ts": float}
+# The user sends/forwards part files as normal messages; each document is
+# collected into "msgs" (driven from auto_leech's pending-input hook via
+# handlers_zip.handle_multi_collect). "✅ Done" starts extraction,
+# "✖ Cancel" aborts. TTL'd so abandoned sessions clean themselves up.
+_unzip_multi = {}
+_unzip_multi_lock = threading.Lock()
+UNZIP_MULTI_TTL = 1800
+
+def set_unzip_multi(chat_id, dest, folder, status_id):
+    with _unzip_multi_lock:
+        _unzip_multi[chat_id] = {"dest": dest, "folder": folder,
+                                  "msgs": [], "status_id": status_id,
+                                  "ts": time.time()}
+
+def get_unzip_multi(chat_id):
+    with _unzip_multi_lock:
+        s = _unzip_multi.get(chat_id)
+        if s and time.time() - s["ts"] > UNZIP_MULTI_TTL:
+            _unzip_multi.pop(chat_id, None)
+            return None
+        return s
+
+def add_unzip_multi_part(chat_id, msg):
+    with _unzip_multi_lock:
+        s = _unzip_multi.get(chat_id)
+        if not s:
+            return 0
+        s["msgs"].append(msg)
+        s["ts"] = time.time()
+        return len(s["msgs"])
+
+def pop_unzip_multi(chat_id):
+    with _unzip_multi_lock:
+        return _unzip_multi.pop(chat_id, None)
+
 # ── Drive browser: per-chat folder navigation + short-lived listing cache ──
 # Full folder contents are fetched once and paginated client-side (see
 # drive.list_folder_full) — this cache is just so paging back and forth
@@ -403,11 +403,11 @@ def invalidate_listing(chat_id):
 _quality_sessions = {}
 QUALITY_SESSION_TTL = 600
 
-def new_quality_session(url, dest, zip_output, reply_to):
+def new_quality_session(url, dest, zip_output, reply_to, file_anchor=None):
     token = uuid.uuid4().hex[:10]
     _quality_sessions[token] = {
         "url": url, "dest": dest, "zip_output": zip_output,
-        "reply_to": reply_to, "ts": time.time(),
+        "reply_to": reply_to, "file_anchor": file_anchor, "ts": time.time(),
     }
     return token
 
@@ -533,23 +533,67 @@ task_queue  = queue.Queue()
 def disk_free_mb():
     return shutil.disk_usage(config.DOWNLOAD_DIR).free // (1024 * 1024)
 
+def ram_free_mb():
+    """Available RAM in MB (Linux /proc/meminfo MemAvailable — the number
+    the kernel OOM killer actually acts on). Returns a huge value when
+    unavailable (non-Linux dev) so RAM guards stay open."""
+    try:
+        with open("/proc/meminfo", encoding="ascii") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) // 1024
+    except Exception:
+        pass
+    return 1 << 20
+
 def ensure_free(mb=config.MIN_FREE_MB):
     if disk_free_mb() >= mb:
         return True
-    for e in sorted(os.scandir(config.DOWNLOAD_DIR), key=lambda x: x.stat().st_mtime):
-        if e.is_dir():
-            shutil.rmtree(e.path, ignore_errors=True)
+    # NEVER touch dirs owned by running jobs — same rule as purge_stale.
+    # Without this, a low-disk moment at one job's start rmtree'd another
+    # live job's task_dir out from under it (its downloads vanished mid-run
+    # and the upload stage then failed with FileNotFoundError).
+    with jobs_lock:
+        active_dirs = {j.get("dir") for j in ACTIVE_JOBS.values()}
+    # snapshot first: the background purge loop may delete entries while we
+    # iterate, and scandir raises FileNotFoundError on exactly that race
+    try:
+        entries = sorted(os.scandir(config.DOWNLOAD_DIR),
+                         key=lambda x: x.stat().st_mtime)
+    except OSError:
+        return disk_free_mb() >= mb
+    for e in entries:
+        try:
+            if e.path in active_dirs:
+                continue
+            if e.is_dir():
+                shutil.rmtree(e.path, ignore_errors=True)
+        except OSError:
+            continue
         if disk_free_mb() >= mb:
             return True
     return disk_free_mb() >= mb
 
 def purge_stale(max_age_s=3600):
+    """Removes stale download dirs. NEVER touches dirs owned by running
+    jobs — v15/v16 would happily delete an active task_dir (with the
+    half-downloaded file inside) either via the hourly loop racing a long
+    job or via /clean, which passed max_age_s=0 (every dir qualifies)."""
     if not os.path.isdir(config.DOWNLOAD_DIR):
         return
     now = time.time()
+    with jobs_lock:
+        active_dirs = {j.get("dir") for j in ACTIVE_JOBS.values()}
     for e in os.scandir(config.DOWNLOAD_DIR):
-        if e.is_dir() and now - e.stat().st_mtime > max_age_s:
-            shutil.rmtree(e.path, ignore_errors=True)
+        try:
+            if not e.is_dir():
+                continue
+            if e.path in active_dirs:
+                continue
+            if now - e.stat().st_mtime > max_age_s:
+                shutil.rmtree(e.path, ignore_errors=True)
+        except OSError:
+            continue
 
 def is_cancelled(task_id):
     with jobs_lock:

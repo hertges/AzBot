@@ -20,7 +20,11 @@ def main():
     cid = sys.argv[2] if len(sys.argv) > 2 else input("Client ID: ").strip()
     csec = sys.argv[3] if len(sys.argv) > 3 else input("Client secret: ").strip()
 
-    redirect = "urn:ietf:wg:oauth:2.0:oob"
+    # Google shut down the legacy urn:ietf:wg:oauth:2.0:oob redirect
+    # ("Error 400: redirect_uri_mismatch"). Same copy/paste workaround the
+    # bot itself uses: redirect to a throwaway localhost port; the browser
+    # lands on a dead page whose ADDRESS BAR holds ?code=... — copy that.
+    redirect = "http://localhost:1/"
     auth_url = ("https://accounts.google.com/o/oauth2/auth?"
                 + urllib.parse.urlencode({
                     "client_id": cid,
@@ -31,7 +35,11 @@ def main():
                     "prompt": "consent",
                   }))
     print("\n1. Open this URL in your browser:\n\n" + auth_url)
-    code = input("\n2. Approve, then paste the code Google shows you: ").strip()
+    print("\n2. Approve, then you'll land on a page that WON'T LOAD — that's normal.")
+    raw = input("   Copy the full URL from the address bar (contains ?code=...) and paste it here: ").strip()
+    import re as _re
+    m = _re.search(r"[?&]code=([\w\-]+)", raw)
+    code = m.group(1) if m else raw.split()[0]
 
     data = urllib.parse.urlencode({
         "code": code, "client_id": cid, "client_secret": csec,

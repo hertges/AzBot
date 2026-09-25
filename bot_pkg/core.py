@@ -1,9 +1,18 @@
-import threading, time, os, sys
+import threading, time, os, sys, ctypes
 
-from pyrogram import Client
-from pyrogram.enums import ParseMode
-
-from . import config, state, log
+# ══ IMPORT ORDER HERE IS LOAD-BEARING ════════════════════════════════════
+# crypto_guard.install() MUST run before pyrogram is imported anywhere in
+# this process. pyrogram.crypto.aes does `import tgcrypto` AT MODULE IMPORT
+# TIME, so a guard that runs after `from pyrogram import Client` can no
+# longer prevent the (potentially segfaulting) C extension from binding —
+# it can only raise ImportError into an already-loaded module. v15 had
+# exactly that broken order, making the whole exit-139 defense inert; that
+# is the most plausible root cause of the mid-archive process deaths
+# ("it just restarts"): heavy MTProto crypto load during a group-topic
+# archive hits the buggy native code the guard was supposed to fence off.
+#
+# config imports only os/re/json/dotenv — safe before pyrogram.
+from . import config
 
 # ── Crash guards — must run BEFORE anything imports tgcrypto/pyrogram ───
 # 1) faulthandler: if native code segfaults again (exit 139), dump the C
@@ -20,6 +29,23 @@ except Exception:
 #    it's the segfaulting kind (pure-Python fallback keeps the bot alive).
 from . import crypto_guard
 crypto_guard.install()
+
+# ── only NOW may pyrogram (and therefore tgcrypto) load ──────────────────
+from pyrogram import Client
+from pyrogram.enums import ParseMode
+
+from . import state, log
+
+# pyrogram's Client() touches asyncio.get_event_loop() at construction
+# time; on Python 3.10+ that raises RuntimeError when no loop exists yet
+# (3.12 deprecation, removed auto-creation in 3.13+). Docker pins 3.12
+# where it still worked — but any 3.13 host would crash at import.
+import asyncio
+try:
+    _loop = asyncio.get_event_loop()
+except RuntimeError:
+    _loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(_loop)
 
 log.setup()
 logger = log.get(__name__)
@@ -91,37 +117,57 @@ def _bg_worker(worker_id):
                             f"BaseException: {type(e).__name__}: {e}", exc_info=True)
         finally:
             state.task_queue.task_done()
+            # after EVERY job: hand freed pages back to the OS while RSS is
+            # at its peak — the ideal trim moment (better than a periodic
+            # sweep, which trims long after the peak anyway)
+            release_ram()
 
 def _start_workers():
     for i in range(config.QUEUE_WORKERS):
         threading.Thread(target=_bg_worker, args=(i,), daemon=True).start()
     logger.info(f"started {config.QUEUE_WORKERS} queue workers")
 
+def release_ram():
+    """Frees Python garbage and returns glibc arena pages to the OS.
+    Called after EVERY job finishes (and still on the 10-min sweep) —
+    post-job is the ideal moment: RSS is at its peak right then, and the
+    freed pages are exactly the ones the job was using. Without the trim,
+    RSS climbs to the high-water mark and stays there."""
+    import gc
+    gc.collect()
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass  # non-glibc / non-Linux — trim unavailable, harmless
+
 def _purge_loop():
+    # Never die: one unhandled exception here used to kill the purge
+    # thread permanently, letting stale dirs pile up until disk fills.
     while True:
+        try:
+            _purge_once()
+        except Exception:
+            logger.exception("purge pass failed — retrying in 10 min")
+        time.sleep(600)
+
+
+def _purge_once():
         before = state.disk_free_mb()
         state.purge_stale()
         after = state.disk_free_mb()
         if after != before:
             logger.info(f"purged stale downloads, freed {after - before} MB")
-        time.sleep(600)
-
-def _yt_dlp_update_loop():
-    from . import engine
-    while True:
-        time.sleep(6 * 3600)  # every 6 hours
-        with state.jobs_lock:
-            idle = not state.ACTIVE_JOBS
-        # Only restart when nothing's actively running — updating the pip
-        # package is always safe, but the restart needed to actually load
-        # it isn't something to do mid-job.
-        engine.update_yt_dlp(restart_on_update=idle)
+        # safety net for idle drift (websocket buffers etc.) between jobs
+        release_ram()
 
 def start():
     global _lock_fh
     _lock_fh = _acquire_single_instance_lock()
-    from . import engine
-    engine.update_yt_dlp(restart_on_update=True)  # safe here — nothing is serving yet
+    # Handler bodies run in utils.AZ_HANDLER_POOL (explicit 16-thread pool —
+    # see utils.guarded). Nothing to tune on the asyncio default executor
+    # anymore; this comment documents where the capacity lives.
+    # NOTE: no yt-dlp auto-update here anymore — restart the bot to pick up
+    # a newer yt-dlp (update the image or run pip in the container first).
     # Restore EVERYTHING user-configured from the Drive datastore on a fresh
     # deploy: settings, users (access control), cookies, OAuth tokens.
     try:
@@ -129,9 +175,6 @@ def start():
         pulled = datastore.restore_all_local()
         if pulled:
             logger.info(f"datastore: restored {', '.join(pulled)}")
-        n_thumbs = state.restore_thumbs()
-        if n_thumbs:
-            logger.info(f"datastore: restored {n_thumbs} custom thumbnail(s)")
         import importlib
         importlib.reload(state)
     except Exception as e:
@@ -146,8 +189,16 @@ def start():
                    handlers_instagram, handlers_drive, handlers_zip,
                    handlers_driveauth, handlers_fallback)  # noqa: F401
     logger.info("handlers registered: core, admin+shell, subproc, instagram+zip, drive+auth, fallback")
+    try:
+        from . import build_info
+        logger.info(f"build: {build_info.build_line()} — if this stamp doesn't move "
+                    f"after a redeploy, the old process is still running")
+    except Exception as e:
+        logger.warning(f"build stamp skipped: {e}")
     _start_workers()
     threading.Thread(target=_purge_loop, daemon=True).start()
-    threading.Thread(target=_yt_dlp_update_loop, daemon=True).start()
+    # one trim right after boot: import-time garbage (unused dunder caches,
+    # dead code objects) goes back to the OS before the first idle reading
+    release_ram()
     logger.info("AzLeechBot starting (Pyrogram, native >50MB uploads)…")
     app.run()

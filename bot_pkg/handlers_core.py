@@ -1,13 +1,14 @@
-import os, re, shutil, time
+﻿import os, re, shutil, time
 from urllib.parse import urlparse
 
-from pyrogram import filters
+from pyrogram import filters, enums
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 
 from . import config, state, engine, uploader, drive, log
 from .core import app
 from .utils import (new_task_id, throttled_edit, fmtsz, fix_unknown_ext, cancel_kb, bar,
-                    smooth_speed, autoclean_if_enabled, guarded, safe_edit, esc)
+                    smooth_speed, autoclean_if_enabled, guarded, safe_edit, esc, fmt_time,
+                    file_anchor)
 from .dispatcher import LiveDispatcher
 
 logger = log.get(__name__)
@@ -52,15 +53,22 @@ def cmd_start(client, message):
 @app.on_message(filters.command("help"))
 @guarded
 def cmd_help(client, message):
-    render_help(message.chat.id)
+    # /help (unlike /start) isn't private-only, so it can be typed inside a
+    # forum-group topic. Thread the reply to message.id — WZML-X-style
+    # anchoring — so it lands in the same topic instead of the group's
+    # General topic (this Pyrogram fork has no message_thread_id param, so
+    # replying to something already in the topic is the only way to land
+    # there).
+    reply_to = message.id if message.chat.type != enums.ChatType.PRIVATE else None
+    render_help(message.chat.id, reply_to=reply_to)
 
 
-def render_help(chat_id, msg_id=None):
+def render_help(chat_id, msg_id=None, reply_to=None):
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("⬇️ Downloads", callback_data="help:dl"),
          InlineKeyboardButton("🗃 Zip", callback_data="help:zip")],
         [InlineKeyboardButton("📷 Instagram", callback_data="help:ig"),
-         InlineKeyboardButton("🖼 Thumbs", callback_data="help:misc")],
+         InlineKeyboardButton("ℹ️ Info", callback_data="help:misc")],
         [InlineKeyboardButton("🍪 Cookies", callback_data="help:cookies"),
          InlineKeyboardButton("🔧 Admin", callback_data="help:admin")],
     ])
@@ -81,7 +89,7 @@ def render_help(chat_id, msg_id=None):
     if msg_id:
         safe_edit(app, chat_id, msg_id, text, reply_markup=kb)
     else:
-        app.send_message(chat_id, text, reply_markup=kb)
+        app.send_message(chat_id, text, reply_markup=kb, reply_to_message_id=reply_to)
 
 
 HELP = {
@@ -97,12 +105,20 @@ HELP = {
            "<code>/yt &lt;link&gt;</code>, <code>/y</code>/<code>/ytdl</code>, "
            "<code>/yl</code>/<code>/ytdlleech</code> — WZML-X-style aliases (quality picker)\n\n"
            "<code>/torrent &lt;magnet or .torrent url&gt;</code> — force aria2c\n"
-           "<code>/gallery &lt;url&gt;</code> / <code>/clone &lt;url&gt;</code> — gallery-dl / wget mirror\n"
-           "<code>/zipl</code> · <code>/zipm</code> · <code>/unzipl</code> — see the 🗃 Zip section\n\n"
+           "<code>/gallery &lt;url&gt;</code> / <code>/g</code> — gallery-dl (files to chat)\n"
+           "<code>/gm</code> / <code>/gallerym</code> — gallery-dl, files to Drive (<code>#folder</code> works)\n"
+           "<code>/galleryz</code> — one zip of everything → chat\n"
+           "<code>/galleryzm</code> — one zip → Drive\n"
+           "<code>/clone &lt;url&gt;</code> / <code>/clonem</code> — wget mirror to chat / Drive\n"
+           "<i>Raw binary flags after</i> <code>--</code> <i>pass straight through:</i> "
+           "<code>/gallery &lt;url&gt; -- --range 1-5 --verbose</code>\n"
+           "<code>/zipl</code> · <code>/zipm</code> · <code>/unzip</code> · "
+           "<code>/unzipm</code> · <code>/unzipmulti</code> — see the 🗃 Zip section\n\n"
            "<code>/drive</code> — browse Drive: get links, send files here, rename/delete, new folders • <code>/drivesearch &lt;q&gt;</code>\n\n"
            "Magnet links are auto-detected in plain messages too. Reply to any file or link instead of typing a URL."),
     "ig": ("📷 <b>Instagram</b>\n\n"
-           "<code>&lt;post/reel url&gt;</code> — just paste it, leeched like any other link\n"
+           "<code>&lt;post/reel url&gt;</code> — just paste it, leeched like any other link "
+           "(always via gallery-dl — never the yt-dlp picker)\n"
            "<code>/ig &lt;profile_url&gt;</code> — multi-select picker: Posts/Reels/Stories/"
            "Highlights/Tagged, then ▶️ Start (Stories on by default). Leeches to Telegram.\n"
            "<code>/igm &lt;profile&gt;</code> — same, but archives go to Drive sorted into "
@@ -112,20 +128,30 @@ HELP = {
            "<code>/igindex</code> — view + delete indexes per user or per type. "
            "Deleting an index makes the next run re-fetch everything.\n\n"
            "Stories &amp; Highlights need a logged-in cookie profile (<code>/cookie</code>)."),
-    "misc": ("🖼 <b>Thumbnails</b>\n\n"
-             "<code>/setthumb</code> — send/reply to an image: it becomes the "
-             "thumbnail on all your video/audio uploads in this chat (fixes black "
-             "thumbnails). <code>/removethumb</code> clears it. Mirrored to Drive.\n\n"
+    "misc": ("ℹ️ <b>Good to know</b>\n\n"
+             "🖼 <b>Thumbnails</b>: fully automatic — every video gets its real "
+             "dimensions/duration shown, and the thumbnail is the source's own "
+             "cover (YouTube etc.) or a frame grabbed from the file itself. "
+             "No setup needed.\n\n"
              "♻️ <b>Duplicate guard</b>: sending the exact same link while it's still "
              "downloading is rejected instead of downloading it twice."),
-    "zip": ("🗃 <b>Zip leech / mirror</b>\n\n"
+    "zip": ("🗃 <b>Zip leech / mirror / unpack</b>\n\n"
             "<code>/zipl</code> — gather files into ONE archive, sent to this chat:\n"
             "• reply to a file → zip it\n"
             "• pass direct links: <code>/zipl link1 link2 | myname.zip</code>\n"
             "<code>/zipm</code> — same but the archive goes to Drive (<code>#folder</code> works)\n\n"
-            "<code>/unzipl</code> — reply to an archive (<code>.zip .rar .7z .tar…</code>) or pass its "
-            "link: every inner file is sent to this chat. <code>/unzipm</code> is an alias.\n\n"
-            "All support batch links + <code>| name</code>."),
+            "<code>/unzip</code> / <code>/unzipl</code> — reply to an archive "
+            "(<code>.zip .rar .7z .tar…</code>) or pass its link: every inner file is "
+            "sent to this chat. If the reply is already a .zip it's sent as-is (no double-zip).\n"
+            "<code>/unzipm</code> — unpack and MIRROR: every inner file goes to Drive "
+            "(<code>#folder</code> works), links collected in the summary.\n\n"
+            "<code>/unzipmulti</code> — MULTIPART session: send the parts one by one "
+            "(<code>.001</code>/<code>.part1.rar</code>/…), each is collected with a live "
+            "counter, then ✅ <b>Done</b> extracts and ✖ <b>Cancel</b> aborts. "
+            "<code>#folder</code> works for Drive.\n\n"
+            "All support batch links + <code>| name</code>. "
+            "gallery-dl equivalents: <code>/galleryz</code> (zip → chat), "
+            "<code>/galleryzm</code> (zip → Drive)."),
     "cookies": ("🍪 <b>Cookies</b>\n\n"
                 "<code>/cookie</code> — list profiles\n<code>/cookie &lt;name&gt;</code> — switch active profile\n"
                 "Reply to a Netscape-format <code>cookies.txt</code> with <code>/cookie &lt;name&gt;</code> to add one.\n\n"
@@ -133,7 +159,6 @@ HELP = {
     "admin": ("🔧 <b>Admin</b>\n\n"
               "<code>/stats</code> — disk, RAM, active jobs\n<code>/clean</code> — purge stale temp files\n"
               "<code>/cancel &lt;id&gt;</code> / 🛑 button — stop a job\n<code>/cancelall</code> — stop everything\n"
-              "<code>/updateyt</code> — update yt-dlp now (auto: startup + every 6h)\n"
               "<code>/sh</code> — live persistent shell terminal (arrow keys, history, Ctrl+C button; <code>/shexit</code> quits)\n"
               "<code>/allow &lt;id&gt;</code> / <code>/ban &lt;id&gt;</code> — access control"),
 }
@@ -279,6 +304,7 @@ def handle_cookie_rename(client, message, old_name):
 def _settings_kb(chat_id):
     clean_on = state.get_autoclean(chat_id)
     doc_on = state.get_as_document(chat_id)
+    media_on = state.get_media_group(chat_id)
     rows = [
         [InlineKeyboardButton(
             "🧹 Auto-clean: " + ("✅ ON" if clean_on else "⬜ OFF"),
@@ -286,6 +312,9 @@ def _settings_kb(chat_id):
         [InlineKeyboardButton(
             "📄 Send as document: " + ("✅ ON" if doc_on else "⬜ OFF"),
             callback_data="toggle_as_document")],
+        [InlineKeyboardButton(
+            "🖼 Albums: " + ("✅ ON" if media_on else "⬜ OFF"),
+            callback_data="toggle_albums")],
         [InlineKeyboardButton(f"☁️ Drive ({len(config.DRIVE_ACCOUNTS)} account"
                               f"{'s' if len(config.DRIVE_ACCOUNTS) != 1 else ''}) ▸",
                               callback_data="acctmenu")],
@@ -295,6 +324,7 @@ def _settings_kb(chat_id):
 def _settings_text(chat_id):
     clean_on = state.get_autoclean(chat_id)
     doc_on = state.get_as_document(chat_id)
+    media_on = state.get_media_group(chat_id)
     clean_line = (
         "🧹 <b>Auto-clean</b>: on — a finished job deletes your link/command "
         "message and my status message, leaving only the delivered file "
@@ -311,20 +341,26 @@ def _settings_text(chat_id):
         "native type with previews and streaming."
     )
     acct = state.get_drive_account(chat_id) or "—"
+    album_line = (
+        "🖼 <b>Albums</b>: on — photos go out in groups of up to 10 "
+        "(one send instead of ten)."
+        if media_on else
+        "🖼 <b>Albums</b>: off — every photo uploads individually."
+    )
     extra = (f"\n\n☁️ <b>Drive</b>: {len(config.DRIVE_ACCOUNTS)} account(s), "
              f"this chat uploads to <code>{esc(acct)}</code>.")
-    return f"⚙️ <b>Settings</b> <i>(this chat only)</i>\n\n{clean_line}\n\n{doc_line}{extra}"
+    return f"⚙️ <b>Settings</b> <i>(this chat only)</i>\n\n{clean_line}\n\n{doc_line}\n\n{album_line}{extra}"
 
 @app.on_message(filters.command("settings") & Authorized)
 @guarded
 def cmd_settings(client, message):
     message.reply_text(_settings_text(message.chat.id), reply_markup=_settings_kb(message.chat.id))
 
-@app.on_callback_query(filters.regex(r"^acctmenu$"))
-@guarded
-def cb_acct_menu(client, cq):
-    """☁️ Drive management section: list accounts, add via OAuth device
-    flow, remove Telegram-registered ones, pick the active one."""
+def _render_drive_accounts(cq):
+    """Sync body of the ☁️ Drive management screen — shared by the button
+    handler AND by add/delete/switch flows that re-render after acting
+    (handlers must never call each other directly now that guarded()
+    wraps them in coroutines)."""
     chat_id = cq.message.chat.id
     current = state.get_drive_account(chat_id)
     lines = []
@@ -347,6 +383,14 @@ def cb_acct_menu(client, cq):
     rows.append([InlineKeyboardButton("⬅️ Back to settings", callback_data="settingsback")])
     safe_edit(cq, text, reply_markup=InlineKeyboardMarkup(rows))
     cq.answer()
+
+
+@app.on_callback_query(filters.regex(r"^acctmenu$"))
+@guarded
+def cb_acct_menu(client, cq):
+    """☁️ Drive management section: list accounts, add via OAuth device
+    flow, remove Telegram-registered ones, pick the active one."""
+    _render_drive_accounts(cq)
 
 
 def _tg_registered_accounts():
@@ -380,7 +424,7 @@ def cb_acct_del(client, cq):
         from . import handlers_driveauth
         handlers_driveauth.remove_account(name)
         cq.answer(f"🗑 {name} removed.")
-        cb_acct_menu(client, cq)   # re-render
+        _render_drive_accounts(cq)   # re-render (handlers can't call handlers anymore)
     except Exception as e:
         cq.answer(f"❌ {e}", show_alert=True)
 
@@ -392,7 +436,7 @@ def cb_acct_set(client, cq):
     ok = state.set_drive_account(cq.message.chat.id, name)
     cq.answer(f"Switched to {name}" if ok else "Unknown account.", show_alert=not ok)
     if ok:
-        cb_acct_menu(client, cq)   # re-render with new selection
+        _render_drive_accounts(cq)   # re-render with new selection
 
 @app.on_callback_query(filters.regex(r"^settingsback$"))
 @guarded
@@ -429,6 +473,17 @@ def cb_toggle_as_document(client, cq):
     safe_edit(cq, _settings_text(chat_id), reply_markup=_settings_kb(chat_id))
 
 
+@app.on_callback_query(filters.regex(r"^toggle_albums$"))
+@guarded
+def cb_toggle_albums(client, cq):
+    chat_id = cq.message.chat.id
+    new_val = not state.get_media_group(chat_id)
+    state.set_media_group(chat_id, new_val)
+    logger.info(f"chat {chat_id} media_group set to {new_val}")
+    cq.answer("Albums " + ("enabled" if new_val else "disabled"))
+    safe_edit(cq, _settings_text(chat_id), reply_markup=_settings_kb(chat_id))
+
+
 @app.on_message(filters.command(["allow", "ban"]) & AdminOnly)
 @guarded
 def cmd_access(client, message):
@@ -449,6 +504,15 @@ def cb_cancel(client, cq):
     task_id = cq.data.split(":", 1)[1]
     ok = state.cancel_task(task_id)
     cq.answer("Stopping…" if ok else "Already finished.")
+    if ok:
+        # Flip the button row so the tap visibly did something (and can't
+        # be tapped twice) — v15/v16 left the old 🛑 in place, so a slow
+        # job made it look like the button was dead.
+        try:
+            cq.message.edit_text("🛑 Stop requested — waiting for the job to halt…",
+                                 reply_markup=None)
+        except Exception:
+            pass
 
 
 # ── Universal mirror/leech dispatcher: /m, /l, /zm, /zl ─────────────────
@@ -476,7 +540,7 @@ def cmd_mirror_leech(client, message):
 
     /igm <profile> — Instagram archive → Drive (per-type subfolders)
     /igl <profile> — Instagram archive → Telegram"""
-    from .utils import parse_payload
+    from .utils import parse_payload, split_ytdlp_format
     cmd = message.command[0]
     dest = "drive" if cmd in ("m", "zm", "y", "ytdl", "ym") else "telegram"
     zip_output = cmd in ("zm", "zl")
@@ -489,6 +553,9 @@ def cmd_mirror_leech(client, message):
         raw = parts[1].strip()
     elif message.reply_to_message and (message.reply_to_message.text or message.reply_to_message.caption):
         raw = message.reply_to_message.text or message.reply_to_message.caption
+    # raw yt-dlp format selector: trailing " -f <selector>" (their own -f
+    # syntax, verbatim). Consumed here so rename/folder parsing never sees it.
+    raw, ytdlp_format = split_ytdlp_format(raw)
 
     links, rename, folder = parse_payload(raw)
 
@@ -508,60 +575,154 @@ def cmd_mirror_leech(client, message):
 
     if not links:
         reply = message.reply_to_message
+        reply_text = (reply.text or reply.caption) if reply else None
         if reply and reply.media:
-            return queue_telegram_media_job(client, message, reply, dest, zip_output=zip_output)
+            # "/m #folder" / "/m | name" as a REPLY to a file: the args
+            # (folder/rename) apply to the re-uploaded media — they used to
+            # be silently dropped here, so #folder mirrored to Drive root.
+            return queue_telegram_media_job(client, message, reply, dest, zip_output=zip_output,
+                                             rename=rename, folder=folder)
+        if reply and reply_text:
+            # "/m #folder" replied to a message containing LINKS: the args
+            # apply to those links too
+            rlinks, rrename, rfolder = parse_payload(reply_text)
+            if rlinks:
+                links = rlinks
+                rename = rename or rrename
+                folder = folder or rfolder
+    if not links:
         return message.reply_text(
             f"⚠️ Usage: <code>/{esc(cmd)} &lt;link&gt;</code> [links…] [ | name] [#folder]\n"
             f"or reply to a link/file with <code>/{esc(cmd)}</code>.")
 
-    # Batch: one job per link; rename only applies to a single link.
-    for i, url in enumerate(links):
-        r = rename if len(links) == 1 else None
-        # WZML-X parity: reject a second download of the SAME url while one
-        # is still active (prevents double-leeched duplicates).
-        active = state.find_active_url(url)
-        if active and active in state.ACTIVE_JOBS:
+    # Batch: when 2+ links are given, ONE batch job processes them
+    # sequentially with a unified progress view (Drive-folder look — header
+    # tracks "2/5 done", each link's bar renders underneath). Rename only
+    # applies to a single link.
+    skipped_dupes = []
+    if len(links) >= 2:
+        kept = []
+        for url in links:
+            # WZML-X parity: skip a second download of the SAME url while
+            # one is still active (prevents double-leeched duplicates) —
+            # but only that link, not the whole batch.
+            active = state.find_active_url(url)
+            if active and active in state.ACTIVE_JOBS:
+                skipped_dupes.append(url)
+                continue
+            kept.append(url)
+        if not kept:
             return message.reply_text(
-                f"⚠️ This exact link is already being downloaded (<code>{esc(active)}</code>). "
-                f"Use /cancel {esc(active)} first if you really want it again.")
-        _dispatch_one(client, message, cmd, url, dest, zip_output, r, folder)
+                "⚠️ Every link in this batch is already being downloaded. "
+                "Use /cancel first if you really want them again.")
+        links = kept
+        task_id = new_task_id()
+        tag = f" 📦→{config.DEST_LABEL[dest]}" if zip_output else f" →{config.DEST_LABEL[dest]}"
+        dupe_note = (f" — skipped {len(skipped_dupes)} duplicate(s) already downloading"
+                     if skipped_dupes else "")
+        status = message.reply_text(
+            f"🔎 Batch of {len(links)} queued{tag}{dupe_note} — <code>{esc(task_id)}</code>",
+            reply_markup=cancel_kb(task_id))
+        task_dir = os.path.join(config.DOWNLOAD_DIR, task_id)
+        state.register_job(task_id, message.chat.id, status.id, "batch", task_dir)
+        for url in links:
+            state.register_url(url, task_id)
+        state.task_queue.put((run_batch_leech_job,
+                               (client, message.chat.id, status.id, links, task_id,
+                                message.id, dest, zip_output, ytdlp_format, folder,
+                                file_anchor(message))))
+        return
+
+    url = links[0]
+    # WZML-X parity: reject a second download of the SAME url while one
+    # is still active (prevents double-leeched duplicates).
+    active = state.find_active_url(url)
+    if active and active in state.ACTIVE_JOBS:
+        return message.reply_text(
+            f"⚠️ This exact link is already being downloaded (<code>{esc(active)}</code>). "
+            f"Use /cancel {esc(active)} first if you really want it again.")
+    _dispatch_one(client, message, cmd, url, dest, zip_output, rename, folder,
+                  format_selector=ytdlp_format)
 
 
-def _dispatch_one(client, message, cmd, url, dest, zip_output, rename=None, folder=None):
+def _dispatch_one(client, message, cmd, url, dest, zip_output, rename=None, folder=None,
+                  format_selector=None):
     if cmd == "torrent":
+        # BUG: this ternary's two branches both evaluated to "telegram"
+        # literally, so it was a no-op that always forced Telegram delivery
+        # regardless of `dest` — currently harmless only because cmd_mirror_
+        # leech() never routes an explicit "/torrent" command through the
+        # drive-dest list, but it silently discarded any future "mirror
+        # this torrent to Drive" support (and made this branch inconsistent
+        # with the equivalent, correct magnet-link handling in
+        # dispatch_link(), which passes `dest` straight through). Just pass
+        # `dest` through here too — callers already validate drive.enabled()
+        # before setting dest="drive" (see cmd_mirror_leech above).
         from .handlers_subproc import queue_subprocess_job
         return queue_subprocess_job(client, message, "torrent", url,
-                                     dest="telegram" if dest != "drive" or not drive.enabled() else "telegram",
-                                     zip_output=zip_output)
+                                     dest=dest, zip_output=zip_output)
 
     # Instagram NEVER goes through yt-dlp's quality picker (WZML-X parity:
     # gallery-dl owns Instagram — photos, carousels and videos alike; the
     # yt-dlp extractor just errors with "No video formats found!").
+    # Checked FIRST because instagram.com also sits in YTDLP_AUTO_HOSTS —
+    # a later media-page check would shadow it and misroute bare pastes.
     host = _host_of(url)
     if any(host == h or host.endswith("." + h) for h in config.IG_HOSTS):
         from .handlers_instagram import dispatch_instagram
         return dispatch_instagram(client, message, url, dest)
 
     # Media-page links get the WZML-X-style quality picker (real resolutions
-    # + sizes). Direct files/magnets skip it.
+    # + sizes). Direct files/magnets skip it. An explicit -f selector skips
+    # the picker entirely (the user already chose the format).
+    if format_selector:
+        return queue_leech_job(client, message, url, dest, zip_output,
+                                rename=rename, folder=folder,
+                                format_selector=format_selector)
     is_media_page = any(host == h or host.endswith("." + h) for h in config.YTDLP_AUTO_HOSTS)
     if is_media_page:
         return show_quality_picker(client, message, url, dest, zip_output,
                                     rename=rename, folder=folder)
     dispatch_link(client, message, url, dest, zip_output=zip_output,
-                  rename=rename, folder=folder)
+                  rename=rename, folder=folder, format_selector=format_selector)
 
 
 def show_quality_picker(client, message, url, dest, zip_output, rename=None, folder=None):
     status = message.reply_text("🔎 Checking available qualities…")
+    import concurrent.futures as _cf
+    _ex = _cf.ThreadPoolExecutor(max_workers=1)
     try:
-        title, options = engine.probe_qualities(url, message.chat.id)
+        # HARD 45s bound on the probe. yt-dlp extraction can hang for
+        # minutes on a hostile/throttled network — with no timeout, /m
+        # stayed silent forever ("no response"). NOTE: the executor is
+        # deliberately NOT used as a context manager — `with` waits for the
+        # still-running probe on exit, which silently turned this 45s
+        # timeout into "block the handler thread for as long as yt-dlp
+        # feels like". shutdown(wait=False) leaves the doomed probe to
+        # finish in the background instead of blocking this handler.
+        fut = _ex.submit(engine.probe_qualities, url, message.chat.id)
+        try:
+            title, options, is_playlist = fut.result(timeout=45)
+        except _cf.TimeoutError:
+            fut.cancel()
+            logger.warning(f"quality probe timed out after 45s for {url}")
+            client.edit_message_text(
+                message.chat.id, status.id,
+                "⏱ Format check took too long (site slow or blocking me).\n"
+                "Tap below to download <b>best-available</b> directly, or retry:",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("⚡ Best-available now",
+                                         callback_data=f"ytq:{state.new_quality_session(url, dest, zip_output, message.id, file_anchor(message))}:bv*+ba/b"),
+                    InlineKeyboardButton("🔄 Retry check",
+                                         callback_data=f"ytretry:{state.new_retry_token(url, dest, zip_output, rename, folder)}"),
+                ]]))
+            return
     except Exception as e:
         # Tell the user WHY there's no picker instead of silently grabbing
         # a low-quality merged format (the "360p with black thumbnail"
         # report = probe failed and auto-best ran with a degraded format
-        # list). yt-dlp is auto-updated every 6h, so most of these are
-        # transient extraction walls — the retry button helps.
+        # list). Most of these are transient extraction walls — the retry
+        # button helps (and a bot restart picks up a newer yt-dlp).
         logger.warning(f"quality probe failed for {url}: {e}")
         from pyrogram.types import InlineKeyboardMarkup as _IKM, InlineKeyboardButton as _IKB
         kb = _IKM([[_IKB("🔄 Retry", callback_data=f"ytretry:{state.new_retry_token(url, dest, zip_output, rename, folder)}")]])
@@ -572,6 +733,19 @@ def show_quality_picker(client, message, url, dest, zip_output, rename=None, fol
             reply_markup=kb,
         )
         return
+    finally:
+        _ex.shutdown(wait=False)
+    # WZML-X parity: a menu is only worth showing when there IS a choice.
+    # One real option → grab it directly for SINGLE videos. PLAYLISTS
+    # ALWAYS show the menu (even BEST-only): silently downloading an
+    # entire playlist without asking was the complaint.
+    video_opts = [o for o in options[1:] if "🎵" not in o["label"]]
+    if not is_playlist and len(video_opts) <= 1:
+        throttled_edit(client, message.chat.id, status.id,
+                        f"🎬 <b>{esc(title[:70])}</b>\nOne quality available — grabbing it…",
+                        force=True)
+        return queue_leech_job(client, message, url, dest, zip_output,
+                                rename=rename, folder=folder)
     try:
         _do_picker(client, message, status.id, url, dest, zip_output, rename, folder, title, options)
     except Exception:
@@ -581,18 +755,21 @@ def show_quality_picker(client, message, url, dest, zip_output, rename=None, fol
 
 
 def _do_picker(client, message, status_id, url, dest, zip_output, rename, folder, title, options):
-    """WZML-X-style menu: one button per real format. Video-only formats go
-    through a second step asking which audio to merge."""
-    token = state.new_quality_session(url, dest, zip_output, message.id)
+    """WZML-X-style menu: one button per real format. Video-only formats
+    auto-merge best audio on pick. The menu message STAYS after selection
+    (user preference — the fresh job status message appears separately)."""
+    token = state.new_quality_session(url, dest, zip_output, message.id, file_anchor(message))
     state.QualityExtra.save(token, rename=rename, folder=folder)
     state.PickerFormats.save(token, title, options)
-    rows, row = [], []
+    rows = []
 
     def add_btn(label, data):
-        row.append(InlineKeyboardButton(label[:60], callback_data=data))
+        nonlocal row            # v15 bug: assignment made Python treat `row`
+        row.append(InlineKeyboardButton(label[:60], callback_data=data))  # as a fresh local → UnboundLocalError on every tap
         if len(row) == 2:
             rows.append(row); row = []
 
+    row = []
     for i, opt in enumerate(options):
         add_btn(opt["label"], f"ytf:{token}:{i}")
     if row:
@@ -609,8 +786,10 @@ def _do_picker(client, message, status_id, url, dest, zip_output, rename, folder
 @app.on_callback_query(filters.regex(r"^ytf:"))
 @guarded
 def cb_format_pick(client, cq):
-    """A concrete format was chosen. If it's video-only, show the WZML-X
-    second step: pick the audio track to merge (or keep as-is)."""
+    """A concrete format was chosen. Video-only formats get BEST audio
+    merged automatically (the old second "🎚 Merge which audio?" step is
+    gone — nobody ever wants a silent video; the rare no-audio case is
+    covered by the 🔇-labeled buttons which already skip merging)."""
     _, token, idx = cq.data.split(":", 2)
     session = state.get_quality_session(token)
     if not session:
@@ -620,19 +799,11 @@ def cb_format_pick(client, cq):
         return cq.answer("Menu expired.", show_alert=True)
     opt = options[int(idx)]
 
-    if not opt.get("needs_audio"):
-        return _launch_leech_from_menu(client, cq, token, session, opt["selector"])
-
-    # ── step 2: audio merge choice ──
-    aud_rows = [
-        [InlineKeyboardButton("🎵 Best Audio", callback_data=f"ytm:{token}:{idx}:ba")],
-        [InlineKeyboardButton("🎵 Medium", callback_data=f"ytm:{token}:{idx}:mid")],
-        [InlineKeyboardButton("🔇 No audio", callback_data=f"ytm:{token}:{idx}:none")],
-        [InlineKeyboardButton("⬅️ Back", callback_data=f"ytback:{token}")],
-    ]
-    state.PickerPending.save(token, opt["selector"])
-    safe_edit(cq, "🎚 <b>Merge which audio?</b>", reply_markup=InlineKeyboardMarkup(aud_rows))
+    selector = opt["selector"]
+    if opt.get("needs_audio"):
+        selector = f"{selector}+ba/b"   # auto-merge best audio
     cq.answer()
+    _launch_leech_from_menu(client, cq, token, session, selector)
 
 
 @app.on_callback_query(filters.regex(r"^ytback:"))
@@ -652,25 +823,6 @@ def cb_format_back(client, cq):
     cq.answer("Expired — send the link again.", show_alert=True)
 
 
-@app.on_callback_query(filters.regex(r"^ytm:"))
-@guarded
-def cb_audio_pick(client, cq):
-    _, token, idx, achoice = cq.data.split(":", 3)
-    session = state.pop_quality_session(token)
-    if not session:
-        return cq.answer("Expired — send the link again.", show_alert=True)
-    vid_sel = state.PickerPending.take(token)
-    if not vid_sel:
-        return cq.answer("Session lost — send the link again.", show_alert=True)
-    extra = state.QualityExtra.take(token)
-
-    audio_map = {"ba": "ba", "mid": "ba[abr<=128]/ba", "none": ""}
-    selector = f"{vid_sel}+{audio_map[achoice]}" if achoice != "none" else vid_sel
-    cq.answer()
-    _launch_status_and_job(client, cq.message.chat.id, cq.message.id, session,
-                           selector, extra)
-
-
 def _launch_leech_from_menu(client, cq, token, session, selector):
     extra = state.QualityExtra.take(token)
     state.pop_quality_session(token)
@@ -683,16 +835,23 @@ def _launch_status_and_job(client, chat_id, reply_msg_id_unused, session,
                            selector, extra):
     task_id = new_task_id()
     tag = f" 📦→{config.DEST_LABEL[session['dest']]}" if session["zip_output"] else f" →{config.DEST_LABEL[session['dest']]}"
+    # Anchor to session["reply_to"] (the ORIGINAL command message, already
+    # inside the right topic) — this Pyrogram fork has no message_thread_id
+    # param, so (WZML-X-style) a new send needs reply_to_message_id pointing
+    # at a message already in the topic, or it lands in the group's General
+    # topic instead of the one the user is actually chatting in.
     status = client.send_message(
         chat_id,
         f"🔎 Queued{tag} — <code>{esc(task_id)}</code>",
+        reply_to_message_id=session["reply_to"],
         reply_markup=cancel_kb(task_id))
     task_dir = os.path.join(config.DOWNLOAD_DIR, task_id)
     state.register_job(task_id, chat_id, status.id, "yt-dlp", task_dir)
     state.task_queue.put((run_leech_job,
                            (client, chat_id, status.id, session["url"], task_id,
                             session["reply_to"], session["dest"], session["zip_output"],
-                            selector, extra.get("rename"), extra.get("folder"))))
+                            selector, extra.get("rename"), extra.get("folder"),
+                            None, True, session.get("file_anchor"))))
 
 
 # Legacy ytq: handler kept for the old bucket-style callbacks (in case an
@@ -714,7 +873,8 @@ def cb_quality_pick(client, cq):
     state.task_queue.put((run_leech_job,
                            (client, cq.message.chat.id, status.id, session["url"], task_id,
                             session["reply_to"], session["dest"], session["zip_output"], selector,
-                            extra.get("rename"), extra.get("folder"))))
+                            extra.get("rename"), extra.get("folder"),
+                            None, True, session.get("file_anchor"))))
 
 
 @app.on_callback_query(filters.regex(r"^ytqcancel:"))
@@ -737,7 +897,7 @@ def cb_quality_retry(client, cq):
     safe_edit(cq, "🔎 Checking available qualities… (retry)")
     # Re-run the picker with a FRESH probe; yt-dlp may have recovered.
     try:
-        title, options = engine.probe_qualities(t["url"], cq.message.chat.id)
+        title, options, _is_pl = engine.probe_qualities(t["url"], cq.message.chat.id)
         _do_picker(client, cq.message, cq.message.id, t["url"], t["dest"],
                    t["zip_output"], t["rename"], t["folder"], title, options)
     except Exception as e:
@@ -746,7 +906,8 @@ def cb_quality_retry(client, cq):
                       zip_output=t["zip_output"], rename=t["rename"], folder=t["folder"])
 
 
-def queue_telegram_media_job(client, message, media_msg, dest, zip_output=False):
+def queue_telegram_media_job(client, message, media_msg, dest, zip_output=False,
+                             rename=None, folder=None):
     """Handles `/m`/`/l` (etc.) used as a reply to a file already in the
     chat — re-downloads that file via Pyrogram and re-uploads it to the
     requested destination, instead of requiring a URL."""
@@ -758,10 +919,12 @@ def queue_telegram_media_job(client, message, media_msg, dest, zip_output=False)
     task_dir = os.path.join(config.DOWNLOAD_DIR, task_id)
     state.register_job(task_id, message.chat.id, status.id, "tg-media", task_dir)
     state.task_queue.put((run_telegram_media_job,
-                           (client, message.chat.id, status.id, media_msg, task_id, message.id, dest, zip_output)))
+                           (client, message.chat.id, status.id, media_msg, task_id, message.id, dest,
+                            zip_output, rename, folder, file_anchor(message))))
 
 
-def run_telegram_media_job(client, chat_id, msg_id, media_msg, task_id, reply_to, dest, zip_output=False):
+def run_telegram_media_job(client, chat_id, msg_id, media_msg, task_id, reply_to, dest,
+                           zip_output=False, rename=None, folder=None, file_anchor=None):
     task_dir = os.path.join(config.DOWNLOAD_DIR, task_id)
     os.makedirs(task_dir, exist_ok=True)
     try:
@@ -791,7 +954,12 @@ def run_telegram_media_job(client, chat_id, msg_id, media_msg, task_id, reply_to
 
         fpath = fix_unknown_ext(fpath)
 
-        if zip_output:
+        if zip_output and fpath.lower().endswith(".zip"):
+            # source is ALREADY a zip — re-zipping would build zpath == fpath
+            # and ZipFile("w") truncates the just-downloaded file before
+            # reading it (the ENOENT-on-upload crash). Send as-is.
+            pass
+        elif zip_output:
             throttled_edit(client, chat_id, msg_id, "📦 Zipping…", force=True)
             import zipfile
             zpath = os.path.join(task_dir, os.path.splitext(os.path.basename(fpath))[0] + ".zip")
@@ -805,10 +973,11 @@ def run_telegram_media_job(client, chat_id, msg_id, media_msg, task_id, reply_to
         file_kb = None
         if dest == "telegram":
             throttled_edit(client, chat_id, msg_id, f"☁️ Uploading… (<code>{fmtsz(size)}</code>)", markup=cancel_kb(task_id), force=True)
-            uploader.upload_to_telegram(client, chat_id, fpath, msg_id, reply_to=reply_to, task_id=task_id)
+            uploader.upload_to_telegram(client, chat_id, fpath, msg_id,
+                                        reply_to=file_anchor, task_id=task_id)
         else:
             throttled_edit(client, chat_id, msg_id, "☁️ Uploading to Drive…", markup=cancel_kb(task_id), force=True)
-            info = drive.upload_file_full(fpath, task_id=task_id)
+            info = drive.upload_file_full(fpath, task_id=task_id, rename=rename, folder=folder)
             if info:
                 links.append(info["link"])
                 file_kb = InlineKeyboardMarkup([[
@@ -833,70 +1002,64 @@ def run_telegram_media_job(client, chat_id, msg_id, media_msg, task_id, reply_to
         shutil.rmtree(task_dir, ignore_errors=True)
 
 
-# ── /setthumb — custom upload thumbnail (WZML-X parity) ──────────────────
-@app.on_message(filters.command(["setthumb", "removethumb"]) & Authorized)
-@guarded
-def cmd_setthumb(client, message):
-    if message.command[0] == "removethumb":
-        removed = state.delete_thumb(message.chat.id)
-        return message.reply_text("🗑 Custom thumbnail removed." if removed
-                                   else "ℹ️ No custom thumbnail was set.")
-
-    reply = message.reply_to_message
-    photo_msg = None
-    if reply and (reply.photo or (reply.document and
-                   (reply.document.mime_type or "").startswith("image/"))):
-        photo_msg = reply
-    elif message.photo or (message.document and
-                           (message.document.mime_type or "").startswith("image/")):
-        photo_msg = message
-
-    if not photo_msg:
-        return message.reply_text(
-            "🖼 Send an image **as a photo or file**, or reply to one, with "
-            "<code>/setthumb</code> — it becomes the thumbnail for all your "
-            "video/audio uploads in this chat.\n<code>/removethumb</code> clears it.")
-    path = client.download_media(photo_msg, file_name=state.thumb_path(message.chat.id) + ".in")
-    if not path:
-        return message.reply_text("❌ Couldn't download that image.")
-    state.set_thumb(message.chat.id, path)
-    try:
-        os.remove(path)
-    except OSError:
-        pass
-    message.reply_text(
-        "✅ Thumbnail set for this chat (used on video/audio uploads).\n"
-        "☁️ Mirrored to Drive: <code>AzBotData/thumbs/" + str(message.chat.id) + ".jpg</code>")
+# ── /setthumb removed — thumbnails are fully automatic now (natural):
+#    the source video's own cover, else an ffmpeg frame grab. ────────────
 
 
 GDRIVE_RE = re.compile(
     r"drive\.google\.com/(?:file/d/|drive/folders/|open\?id=|drive/u/\d+/folders/)([\w-]+)"
     r"|drive\.google\.com/uc\?(?:export=download&)?id=([\w-]+)"
+    r"|drive\.usercontent\.google\.com/download\?id=([\w-]+)"
+    r"|docs\.google\.com/uc\?(?:export=download&)?id=([\w-]+)"
+    r"|drive\.google\.com/drive/(?:u/\d+/|mobile/)*folders/([\w-]+)"
 )
 
+def _gdrive_file_id(url):
+    """file_id for ANY recognized Google Drive link form (file/folder/uc/
+    usercontent download, mobile/u/ folder forms), else None. Used by the
+    router so no Drive link variant can fall through to yt-dlp's generic
+    extractor (the usercontent.google.com host form did exactly that — its
+    host isn't drive.google.com, so the old host check missed it)."""
+    m = GDRIVE_RE.search(url)
+    if not m:
+        return None
+    # groups(): returns None for non-participating groups
+    return next((g for g in m.groups() if g), None)
 
-def dispatch_link(client, message, url, dest, zip_output=False, rename=None, folder=None):
+
+def dispatch_link(client, message, url, dest, zip_output=False, rename=None, folder=None,
+                  format_selector=None):
     """Routes url to the right downloader based on what it looks like —
     magnet/torrent, Instagram, a Google Drive file/folder link, or the
     generic yt-dlp/direct-download path — carrying dest/zip/rename/folder
-    through to whichever job actually runs."""
+    (and the raw yt-dlp -f selector, when given) through to whichever job
+    actually runs."""
     host = _host_of(url)
 
     if url.startswith("magnet:") or url.lower().endswith(".torrent"):
         from .handlers_subproc import queue_subprocess_job
         return queue_subprocess_job(client, message, "torrent", url, dest, zip_output)
-    if host in ("drive.google.com",):
-        m = GDRIVE_RE.search(url)
-        if m:
-            file_id = m.group(1) or m.group(2)
-            return queue_gdrive_job(client, message, file_id, dest, zip_output,
+
+    # Google Drive — file, folder, uc, open?id and usercontent download
+    # forms. A recognized link ALWAYS routes to the Drive pipeline here;
+    # an unrecognized drive.google.com URL (the Drive UI itself — no file
+    # id) is rejected with a hint instead of silently going to yt-dlp.
+    if host in ("drive.google.com", "drive.usercontent.google.com", "docs.google.com"):
+        fid = _gdrive_file_id(url)
+        if fid:
+            return queue_gdrive_job(client, message, fid, dest, zip_output,
                                      rename=rename, folder=folder)
+        return message.reply_text(
+            "☁️ That's a Google Drive URL but I couldn't find a file/folder id in it.\n"
+            "Open it in Drive and share the direct file or folder link "
+            "(<code>drive.google.com/file/d/…</code> or <code>/folders/…</code>).")
 
     if any(host == h or host.endswith("." + h) for h in config.IG_HOSTS):
         from .handlers_instagram import dispatch_instagram
         return dispatch_instagram(client, message, url, dest)
 
-    queue_leech_job(client, message, url, dest, zip_output, rename=rename, folder=folder)
+    queue_leech_job(client, message, url, dest, zip_output, rename=rename, folder=folder,
+                    format_selector=format_selector)
 
 
 def queue_gdrive_job(client, message, file_id, dest, zip_output=False, rename=None, folder=None):
@@ -914,11 +1077,11 @@ def queue_gdrive_job(client, message, file_id, dest, zip_output=False, rename=No
     state.register_job(task_id, message.chat.id, status.id, "gdrive", task_dir)
     state.task_queue.put((run_gdrive_job,
                            (client, message.chat.id, status.id, file_id, task_id, message.id,
-                            dest, zip_output, rename, folder)))
+                            dest, zip_output, rename, folder, file_anchor(message))))
 
 
 def run_gdrive_job(client, chat_id, msg_id, file_id, task_id, reply_to, dest,
-                   zip_output=False, rename=None, folder=None):
+                   zip_output=False, rename=None, folder=None, file_anchor=None):
     task_dir = os.path.join(config.DOWNLOAD_DIR, task_id)
     os.makedirs(task_dir, exist_ok=True)
     try:
@@ -933,7 +1096,68 @@ def run_gdrive_job(client, chat_id, msg_id, file_id, task_id, reply_to, dest,
             )
 
         if meta.get("mimeType") == "application/vnd.google-apps.folder":
-            _download_gdrive_folder(client, chat_id, msg_id, task_id, meta, task_dir)
+            # Overview FIRST (pure API, no downloads): what's inside, how big.
+            ov = _drive_folder_overview(meta["id"])
+            lines = [f"📂 <b>{esc(meta.get('name', 'folder'))}</b> — overview",
+                     f"📄 {ov['files']} file(s) • 📦 {fmtsz(ov['bytes'])}"]
+            bits = []
+            if ov["video"]:
+                bits.append(f"🎬 {ov['video']} video")
+            if ov["image"]:
+                bits.append(f"🖼 {ov['image']} image")
+            if ov["audio"]:
+                bits.append(f"🎵 {ov['audio']} audio")
+            if ov["other"]:
+                bits.append(f"📎 {ov['other']} other")
+            if bits:
+                lines.append(" · ".join(bits))
+            lines.append("⏳ Starting — every file is sent the moment it's downloaded "
+                         "and deleted right after its upload…")
+            throttled_edit(client, chat_id, msg_id, "\n".join(lines), force=True)
+
+            if zip_output:
+                # an archive needs every file on disk before it can be built
+                _download_gdrive_folder(client, chat_id, msg_id, task_id, meta, task_dir)
+            else:
+                # Live-stream the folder: a LiveDispatcher watches task_dir
+                # WHILE the walk downloads, so each file is uploaded the
+                # moment it lands and deleted right after it's sent. The old
+                # behavior held the ENTIRE folder on disk before the first
+                # upload even started — both a "sent immediately" violation
+                # and a disk-space bomb on big folders.
+                # The overview totals feed a live "37/214 sent • 1.2 GB /
+                # 4.5 GB" position header on every progress edit.
+                disp = LiveDispatcher(client, chat_id, msg_id, task_dir, dest,
+                                      reply_to=file_anchor, task_id=task_id, folder=folder,
+                                      title=meta.get("name", "folder"),
+                                      total_files=ov["files"], total_bytes=ov["bytes"])
+                try:
+                    _download_gdrive_folder(client, chat_id, msg_id, task_id, meta, task_dir,
+                                            disp=disp)
+                    if state.is_cancelled(task_id):
+                        # route through finalize (not just stop()) so the
+                        # executor threads shut down deterministically —
+                        # pending workers see the cancel flag and discard
+                        # themselves, and their finally-block deletes the
+                        # partial files they were holding.
+                        try:
+                            disp.finalize(timeout=60)
+                        except Exception:
+                            disp.stop()   # timeout waiting on stragglers — just stop
+                        return throttled_edit(client, chat_id, msg_id, "🛑 Cancelled.", force=True)
+                    sent, errors = disp.finalize(timeout=1800)
+                except BaseException:
+                    disp.stop()   # never leak the watcher thread on error paths
+                    raise
+                if sent == 0 and not errors:
+                    return throttled_edit(client, chat_id, msg_id,
+                                          "❌ Nothing to upload — the folder may be empty.", force=True)
+                summary = f"✅ Done — {sent} file(s) → {config.DEST_LABEL[dest]}"
+                if errors:
+                    summary += f"\n⚠️ {len(errors)} failed."
+                throttled_edit(client, chat_id, msg_id, summary, force=True)
+                autoclean_if_enabled(client, chat_id, msg_id, reply_to, dest)
+                return
         else:
             _download_gdrive_single(client, chat_id, msg_id, task_id, meta, task_dir)
 
@@ -948,17 +1172,27 @@ def run_gdrive_job(client, chat_id, msg_id, file_id, task_id, reply_to, dest,
             throttled_edit(client, chat_id, msg_id, "📦 Zipping…", force=True)
             import zipfile
             zpath = os.path.join(config.DOWNLOAD_DIR, f"{task_id}.zip")
-            with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
-                for fp in entries:
-                    zf.write(fp, os.path.relpath(fp, task_dir))
-            throttled_edit(client, chat_id, msg_id, f"☁️ Uploading… (<code>{fmtsz(os.path.getsize(zpath))}</code>)", force=True)
-            if dest == "telegram":
-                uploader.upload_to_telegram(client, chat_id, zpath, msg_id, reply_to=reply_to, task_id=task_id)
-            else:
-                drive.upload_file(zpath, task_id=task_id)
-            os.remove(zpath)
-            throttled_edit(client, chat_id, msg_id, f"✅ Done → {config.DEST_LABEL[dest]}", force=True)
-        elif len(entries) == 1 and meta.get("mimeType") != "application/vnd.google-apps.folder":
+            try:
+                with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
+                    for fp in entries:
+                        zf.write(fp, os.path.relpath(fp, task_dir))
+                throttled_edit(client, chat_id, msg_id, f"☁️ Uploading… (<code>{fmtsz(os.path.getsize(zpath))}</code>)", force=True)
+                if dest == "telegram":
+                    uploader.upload_to_telegram(client, chat_id, zpath, msg_id,
+                                                reply_to=file_anchor, task_id=task_id)
+                else:
+                    drive.upload_file_full(zpath, task_id=task_id, rename=rename,
+                                           folder=folder, chat_id=chat_id)
+                throttled_edit(client, chat_id, msg_id, f"✅ Done → {config.DEST_LABEL[dest]}", force=True)
+            finally:
+                # zpath lives OUTSIDE task_dir (so zip_dir can't zip itself) —
+                # without this finally, any upload error leaked the archive
+                # in downloads/ forever (purge_stale only scans dirs).
+                try:
+                    os.remove(zpath)
+                except OSError:
+                    pass
+        else:
             fpath = fix_unknown_ext(entries[0])
             size = os.path.getsize(fpath)
             done_kb = None
@@ -978,7 +1212,8 @@ def run_gdrive_job(client, chat_id, msg_id, file_id, task_id, reply_to, dest,
                         pass
                     size = os.path.getsize(fpath)
                 throttled_edit(client, chat_id, msg_id, f"☁️ Uploading… (<code>{fmtsz(size)}</code>)", markup=cancel_kb(task_id), force=True)
-                uploader.upload_to_telegram(client, chat_id, fpath, msg_id, reply_to=reply_to, task_id=task_id)
+                uploader.upload_to_telegram(client, chat_id, fpath, msg_id,
+                                            reply_to=file_anchor, task_id=task_id)
             else:
                 throttled_edit(client, chat_id, msg_id, "☁️ Uploading to Drive…", markup=cancel_kb(task_id), force=True)
                 info = drive.upload_file_full(fpath, task_id=task_id, rename=rename,
@@ -999,16 +1234,6 @@ def run_gdrive_job(client, chat_id, msg_id, file_id, task_id, reply_to, dest,
             if link:
                 summary += f"\n{link}"
             throttled_edit(client, chat_id, msg_id, summary, markup=done_kb, force=True)
-        else:
-            throttled_edit(client, chat_id, msg_id, f"☁️ Uploading {len(entries)} file(s)…", force=True)
-            disp = LiveDispatcher(client, chat_id, msg_id, task_dir, dest, reply_to=reply_to, task_id=task_id)
-            for fp in entries:
-                disp.submit(fix_unknown_ext(fp))
-            sent, errors = disp.finalize(timeout=1800)
-            summary = f"✅ Done — {sent} file(s) → {config.DEST_LABEL[dest]}"
-            if errors:
-                summary += f"\n⚠️ {len(errors)} failed."
-            throttled_edit(client, chat_id, msg_id, summary, force=True)
 
         autoclean_if_enabled(client, chat_id, msg_id, reply_to, dest)
 
@@ -1022,6 +1247,39 @@ def run_gdrive_job(client, chat_id, msg_id, file_id, task_id, reply_to, dest,
         shutil.rmtree(task_dir, ignore_errors=True)
 
 
+def _drive_folder_overview(folder_id):
+    """Cheap API-only walk (no downloads): counts files, sums bytes and
+    buckets them by broad type, so the user gets an overview of what's
+    inside a Drive folder link BEFORE anything is fetched. Capped at the
+    same 2000-item limit the downloader uses."""
+    FOLDER_MIME = "application/vnd.google-apps.folder"
+    stats = {"files": 0, "bytes": 0, "video": 0, "image": 0, "audio": 0, "other": 0}
+
+    def _bucket(mime):
+        mime = mime or ""
+        for k in ("video", "image", "audio"):
+            if mime.startswith(k + "/"):
+                return k
+        return "other"
+
+    def walk(fid, depth):
+        if depth > 8 or stats["files"] >= 2000:
+            return
+        for f in drive.list_folder_any(fid):
+            if f.get("mimeType") == FOLDER_MIME:
+                walk(f["id"], depth + 1)
+            else:
+                stats["files"] += 1
+                stats["bytes"] += int(f.get("size") or 0)
+                stats[_bucket(f.get("mimeType"))] += 1
+
+    try:
+        walk(folder_id, 0)
+    except Exception as e:
+        logger.warning(f"folder overview walk failed: {e}")
+    return stats
+
+
 def _download_gdrive_single(client, chat_id, msg_id, task_id, meta, task_dir):
     fname = meta.get("name", "file")
     fpath = os.path.join(task_dir, fname)
@@ -1029,7 +1287,13 @@ def _download_gdrive_single(client, chat_id, msg_id, task_id, meta, task_dir):
     drive.download_file_content(meta["id"], fpath, task_id=task_id, mime_type=meta.get("mimeType"))
 
 
-def _download_gdrive_folder(client, chat_id, msg_id, task_id, folder_meta, task_dir):
+def _download_gdrive_folder(client, chat_id, msg_id, task_id, folder_meta, task_dir,
+                            disp=None):
+    """Walks a Drive folder, downloading each file. disp (the streaming
+    dispatcher) makes download progress LIVE and unambiguous during the
+    overlap: its header shows sent X/N, and a callback updates the
+    current-download line with per-chunk byte progress — so during the
+    'file 2 uploads while file 3 downloads' phase BOTH sides are visible."""
     root = os.path.join(task_dir, folder_meta.get("name", "folder"))
     os.makedirs(root, exist_ok=True)
 
@@ -1044,17 +1308,39 @@ def _download_gdrive_folder(client, chat_id, msg_id, task_id, folder_meta, task_
                 os.makedirs(sub, exist_ok=True)
                 walk(f["id"], sub, depth + 1)
             else:
-                throttled_edit(client, chat_id, msg_id, f"⬇️ Downloading from Drive…\n`{f.get('name','?')}`",
-                                markup=cancel_kb(task_id))
+                fname = f.get("name", "?")
+                expected_total = int(f.get("size") or 0)
+
+                def _dprog(done, ctotal, _n=[0], _fname=fname, _total=expected_total):
+                    # ctotal can read 0 on early chunks — fall back to the
+                    # Drive listing's known file size so the bar never shows
+                    # the bogus "176 MB / 0 B"
+                    if disp is None:
+                        return
+                    now = time.time()
+                    if now - _n[0] < 1.5 and done != _total:
+                        return
+                    _n[0] = now
+                    disp._set_download(_fname, done, ctotal or _total)
+
+                if disp is not None:
+                    disp._set_download(fname, 0, expected_total, force=True)
+                else:
+                    throttled_edit(client, chat_id, msg_id,
+                                   f"⬇️ Downloading from Drive…\n`{fname}`",
+                                   markup=cancel_kb(task_id))
                 try:
                     drive.download_file_content(
                         f["id"], os.path.join(local_dir, f.get("name", f["id"])),
                         task_id=task_id, mime_type=f.get("mimeType"),
-                    )
+                        progress_cb=_dprog)
                 except state.CancelledError:
                     raise
                 except Exception as e:
                     logger.warning(f"[{task_id}] gdrive folder item failed: {f.get('name')}: {e}")
+                finally:
+                    if disp is not None:
+                        disp._set_download(None, 0, 0)
 
     walk(folder_meta["id"], root)
 
@@ -1070,37 +1356,246 @@ def queue_leech_job(client, message, url, dest, zip_output=False, format_selecto
     state.register_url(url, task_id)
     state.task_queue.put((run_leech_job,
                            (client, message.chat.id, status.id, url, task_id, message.id, dest,
-                            zip_output, format_selector, rename, folder)))
+                            zip_output, format_selector, rename, folder,
+                            None, True, file_anchor(message))))
+
+
+def run_batch_leech_job(client, chat_id, msg_id, urls, task_id, reply_to, dest,
+                        zip_output=False, format_selector=None, folder=None,
+                        file_anchor=None):
+    """Batch links in ONE job with the Drive-folder look: a single status
+    message whose header tracks the batch (📂 Batch — 2/5 processed) while
+    each link's own download/upload bar renders underneath it. Links are
+    processed SEQUENTIALLY in one worker so their progress edits can't
+    fight each other (the flicker bug), files stream out per link, and a
+    final batch summary lands as its own message."""
+    task_dir = os.path.join(config.DOWNLOAD_DIR, task_id)
+    os.makedirs(task_dir, exist_ok=True)
+    t_start = time.time()
+    total = len(urls)
+    batch = {"i": 0, "failed": 0, "files": 0, "bytes": 0}
+
+    def prefix_fn():
+        left = total - batch["i"]
+        return (f"📂 <b>Batch</b> — {batch['i']}/{total} done • {left} left • "
+                f"{fmtsz(batch['bytes'])} sent")
+
+    def bump(path, size):
+        batch["files"] += 1
+        batch["bytes"] += size
+
+    try:
+        for url in urls:
+            if state.is_cancelled(task_id):
+                break
+            batch["i"] += 1
+            try:
+                run_leech_job(client, chat_id, msg_id, url, task_id, reply_to, dest,
+                              zip_output, format_selector, None, folder,
+                              progress_prefix_fn=prefix_fn, cleanup=False,
+                              file_anchor=file_anchor, on_sent=bump)
+            except Exception as e:
+                batch["failed"] += 1
+                logger.warning(f"[{task_id}] batch link failed: {e}")
+                throttled_edit(client, chat_id, msg_id,
+                               f"{prefix_fn()}\n⚠️ One link failed: <code>{esc(str(e)[:120])}</code>",
+                               force=True)
+        summary = (f"✅ Batch complete — {total - batch['failed']}/{total} links → "
+                   f"{config.DEST_LABEL[dest]}")
+        if batch["failed"]:
+            summary += f"\n⚠️ {batch['failed']} failed"
+        summary += f"\n⏱ {fmt_time(int(time.time() - t_start))}"
+        # final result as its own plain message (the status bubble keeps the
+        # last progress state as a record)
+        try:
+            client.send_message(chat_id, summary, reply_to_message_id=file_anchor)
+        except Exception as e:
+            logger.warning(f"batch summary send failed, falling back to status edit: {e}")
+            throttled_edit(client, chat_id, msg_id, summary, force=True)
+        autoclean_if_enabled(client, chat_id, msg_id, reply_to, dest)
+    finally:
+        state.drop_job(task_id)
+        state.drop_url_by_task(task_id)
+        shutil.rmtree(task_dir, ignore_errors=True)
 
 
 def run_leech_job(client, chat_id, msg_id, url, task_id, reply_to, dest, zip_output=False,
-                  format_selector=None, rename=None, folder=None):
+                  format_selector=None, rename=None, folder=None,
+                  progress_prefix_fn=None, cleanup=True, file_anchor=None, on_sent=None):
     task_dir = os.path.join(config.DOWNLOAD_DIR, task_id)
     _source_thumb_url = None   # original video's thumbnail (YouTube etc.)
+    t_start = time.time()
     try:
         if not state.ensure_free(config.MIN_FREE_MB):
             return throttled_edit(client, chat_id, msg_id, "❌ Disk full, try again later.", force=True)
 
-        throttled_edit(client, chat_id, msg_id, "🔎 Resolving link…", markup=cancel_kb(task_id), force=True)
+        pref = progress_prefix_fn() if progress_prefix_fn else ""
+        if pref:
+            pref += "\n"
+        throttled_edit(client, chat_id, msg_id, f"{pref}🔎 Resolving link…", markup=cancel_kb(task_id), force=True)
 
         host = _host_of(url)
         known_site = any(host == h or host.endswith("." + h) for h in config.YTDLP_AUTO_HOSTS)
         # Instagram is gallery-dl territory, never yt-dlp (WZML-X parity).
+        # v15 bug: this referenced `message`, which doesn't exist inside
+        # run_leech_job (it runs from the queue with explicit args) — every
+        # Instagram link that reached here crashed with NameError.
         if any(host == h or host.endswith("." + h) for h in config.IG_HOSTS):
             from .handlers_subproc import queue_subprocess_job
-            return queue_subprocess_job(client, message, "gallery", url, dest, zip_output)
+
+            class _MsgShim:
+                """queue_subprocess_job expects a Message (chat.id/.id/
+                reply_text); rebuild the minimum surface from our args.
+                reply_text() must mimic real Pyrogram semantics (quote=True
+                by default in groups, i.e. reply_to_message_id=self.id) or
+                the status message it creates loses its topic anchor and
+                lands in the group's General topic instead of msg_id's."""
+                def __init__(self):
+                    self.chat = type("C", (), {"id": chat_id})()
+                    self.id = msg_id
+                def reply_text(self, text, **kw):
+                    kw.setdefault("reply_to_message_id", self.id)
+                    return client.send_message(chat_id, text, **kw)
+
+            sub_tid = queue_subprocess_job(client, _MsgShim(), "gallery", url,
+                                            dest, zip_output, anchor=file_anchor)
+            # Leave an explanatory breadcrumb in THIS status bubble instead
+            # of a dead "Queued" message pointing at nothing.
+            if sub_tid:
+                throttled_edit(client, chat_id, msg_id,
+                                f"📷 Instagram link — handed to <b>gallery-dl</b> "
+                                f"(job <code>{esc(sub_tid)}</code>).", force=True)
+            return
         use_direct = engine.is_direct_file_link(url)
+        probed_name = None
         if not use_direct and not known_site:
-            probed = engine.probe_is_direct_file(url)
+            probed_name, probed = engine.probe_direct(url)
             if probed:
                 logger.info(f"[{task_id}] {host} isn't text/html — treating as a direct file, not a video page")
             use_direct = bool(probed)
+            if not use_direct and probed is None and engine.looks_like_file_url(url):
+                # probe inconclusive (slow/dead server) + the URL path ends
+                # with a file extension → direct download, never yt-dlp
+                logger.info(f"[{task_id}] {host} probe inconclusive but URL has a file extension — direct download")
+                use_direct = True
 
         if use_direct:
-            fpath = engine.download_direct(url, chat_id, msg_id, task_id, client, task_dir)
+            with state.jobs_lock:
+                if task_id in state.ACTIVE_JOBS:
+                    state.ACTIVE_JOBS[task_id]["kind"] = "direct"   # /stats truth
+            fpath = engine.download_direct(url, chat_id, msg_id, task_id, client, task_dir,
+                                            progress_prefix_fn=progress_prefix_fn)
             info = None
         else:
-            fpath, info = engine.download(url, chat_id, msg_id, task_id, client, task_dir, format_selector=format_selector)
+            # PLAYLIST (WZML-X style): the yt-dlp info-dict hook is the
+            # SINGLE source of truth — each entry is handed over the moment
+            # its final post-processed file exists; the dispatcher runs with
+            # the filesystem watcher DISABLED (a watcher here sweeps up
+            # yt-dlp's intermediate format files (.f137.mp4/.f140.m4a) and
+            # .meta sidecars, causing double-sends and phantom failures).
+            # Each entry gets the metadata re-tag + unknown-ext fix before
+            # its send, then is deleted right after it's sent.
+            # /zm /zl (zip_output) bypasses streaming entirely: every entry
+            # is collected and sent as ONE zip — streaming + zipping are
+            # mutually exclusive by definition.
+            playlist_state = {"n": 0}
+            disp_holder = {}
+            if zip_output:
+                result = engine.download(url, chat_id, msg_id, task_id, client, task_dir,
+                                         format_selector=format_selector)
+                if not isinstance(result, list):
+                    files = []
+                else:
+                    files = [p for p in result if os.path.exists(p) and os.path.getsize(p) > 0]
+                if not files:
+                    return throttled_edit(client, chat_id, msg_id,
+                                          "❌ Playlist had no downloadable entries.", force=True)
+                throttled_edit(client, chat_id, msg_id,
+                               f"📦 Zipping {len(files)} item(s)…", force=True)
+                import zipfile
+                # zip name from the playlist title — entries are "NN - Title"
+                stem = re.sub(r"^\d+\s*[-.]\s*", "",
+                              os.path.splitext(os.path.basename(files[0]))[0]) or task_id
+                zpath = os.path.join(task_dir, f"{stem}.zip")
+                with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
+                    for fp in files:
+                        zf.write(fp, os.path.basename(fp))
+                size = os.path.getsize(zpath)
+                links = []
+                file_kb = None
+                if dest == "drive":
+                    throttled_edit(client, chat_id, msg_id, "☁️ Uploading to Drive…", markup=cancel_kb(task_id), force=True)
+                    dinfo = drive.upload_file_full(zpath, task_id=task_id, rename=rename, folder=folder)
+                    if dinfo:
+                        links.append(dinfo["link"])
+                        file_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔗 Get link", callback_data=f"qlink:{dinfo['id']}")]])
+                else:
+                    throttled_edit(client, chat_id, msg_id, f"☁️ Uploading… (<code>{fmtsz(size)}</code>)", markup=cancel_kb(task_id), force=True)
+                    uploader.upload_to_telegram(client, chat_id, zpath, msg_id,
+                                                reply_to=file_anchor, task_id=task_id)
+                summary = (f"✅ Playlist zip — {len(files)} item(s), 📦 <code>{fmtsz(size)}</code> "
+                           f"→ {config.DEST_LABEL[dest]}")
+                if links:
+                    summary += "\n" + "\n".join(links)
+                summary += f"\n⏱ {fmt_time(int(time.time() - t_start))}"
+                throttled_edit(client, chat_id, msg_id, summary, markup=file_kb, force=True)
+                autoclean_if_enabled(client, chat_id, msg_id, reply_to, dest)
+                return
+            playlist_state = {"n": 0}
+            disp_holder = {}
+
+            def _finish_entry(path):
+                """WZML-X per-entry pipeline: fix ext, re-tag metadata,
+                THEN submit. Returns the final path (or None to skip)."""
+                fixed = fix_unknown_ext(path)
+                if fixed == path and not os.path.exists(path):
+                    return None   # gone before we got to it — skip
+                return engine.fix_media_metadata(fixed)
+
+            def _on_entry(path):
+                try:
+                    final = _finish_entry(path)
+                    if not final:
+                        return
+                    if "disp" not in disp_holder:
+                        disp_holder["disp"] = LiveDispatcher(
+                            client, chat_id, msg_id, task_dir, dest,
+                            reply_to=file_anchor, task_id=task_id, max_workers=2,
+                            watch=False,   # info-dict hook is the ONLY feed
+                            on_sent=on_sent)
+                        throttled_edit(client, chat_id, msg_id,
+                                       f"📂 Playlist — streaming → {config.DEST_LABEL[dest]}",
+                                       force=True)
+                    playlist_state["n"] += 1
+                    disp_holder["disp"].submit(final)
+                except Exception as ex:
+                    logger.warning(f"[{task_id}] playlist entry dispatch failed: {ex}")
+
+            result = engine.download(url, chat_id, msg_id, task_id, client, task_dir,
+                                     format_selector=format_selector,
+                                     on_entry_done=_on_entry,
+                                     progress_prefix_fn=progress_prefix_fn)
+            if result is None:
+                # playlist streamed — every entry already dispatched
+                d = disp_holder.get("disp")
+                if d is None:
+                    return throttled_edit(client, chat_id, msg_id,
+                                          "❌ Playlist had no downloadable entries.", force=True)
+                sent, errors = d.finalize(timeout=7200)
+                summary = f"✅ Playlist done — {sent} item(s) → {config.DEST_LABEL[dest]}"
+                if errors:
+                    summary += f"\n⚠️ {len(errors)} failed"
+                summary += f"\n⏱ {fmt_time(int(time.time() - t_start))}"
+                # final result as its own plain message (like the IG summary) —
+                # the status bubble stays behind as the progress record
+                try:
+                    client.send_message(chat_id, summary, reply_to_message_id=d.reply_to)
+                except Exception as e:
+                    logger.warning(f"playlist summary send failed, falling back to status edit: {e}")
+                    throttled_edit(client, chat_id, msg_id, summary, force=True)
+                autoclean_if_enabled(client, chat_id, msg_id, reply_to, dest)
+                return
+            fpath, info = result
             # Remember the ORIGINAL video's thumbnail so the Telegram upload
             # shows exactly what the YouTube page shows (WZML-X parity).
             if isinstance(info, dict):
@@ -1115,7 +1610,12 @@ def run_leech_job(client, chat_id, msg_id, url, task_id, reply_to, dest, zip_out
         # showed up as "0 seconds" in the player). Re-tag from ffprobe.
         fpath = engine.fix_media_metadata(fpath)
 
-        if zip_output:
+        if zip_output and fpath.lower().endswith(".zip"):
+            # source is ALREADY a zip — re-zipping would build zpath == fpath
+            # and ZipFile("w") truncates the just-downloaded file before
+            # reading it (the ENOENT-on-upload crash). Send as-is.
+            pass
+        elif zip_output:
             throttled_edit(client, chat_id, msg_id, "📦 Zipping…", force=True)
             import zipfile
             zpath = os.path.join(task_dir, os.path.splitext(os.path.basename(fpath))[0] + ".zip")
@@ -1127,6 +1627,15 @@ def run_leech_job(client, chat_id, msg_id, url, task_id, reply_to, dest, zip_out
         size = os.path.getsize(fpath)
         links = []
         file_kb = None
+
+        # Real resolution/duration of the finished file — shown in the
+        # completion summary ("no quality is shown to me" fix). Gated to
+        # actual media: ffprobe on a zip/pdf is just a wasted subprocess.
+        vmeta = uploader.probe_meta_if_media(fpath)
+        qline = ""
+        if vmeta.get("width"):
+            from .uploader import _quality_line
+            qline = _quality_line(vmeta)
 
         if dest == "telegram":
             if rename:
@@ -1144,10 +1653,21 @@ def run_leech_job(client, chat_id, msg_id, url, task_id, reply_to, dest, zip_out
                 except OSError:
                     pass
                 size = os.path.getsize(fpath)
-            throttled_edit(client, chat_id, msg_id, f"☁️ Uploading… (<code>{fmtsz(size)}</code>)", markup=cancel_kb(task_id), force=True)
-            uploader.upload_to_telegram(client, chat_id, fpath, msg_id, reply_to=reply_to, task_id=task_id,
-                                        video_meta=engine.probe_video_meta(fpath),
+            pref = progress_prefix_fn() if progress_prefix_fn else ""
+            if pref:
+                pref += "\n"
+            throttled_edit(client, chat_id, msg_id,
+                           f"{pref}☁️ Uploading… (<code>{fmtsz(size)}</code>)",
+                           markup=cancel_kb(task_id), force=True)
+            uploader.upload_to_telegram(client, chat_id, fpath, msg_id,
+                                        reply_to=file_anchor, task_id=task_id,
+                                        video_meta=vmeta,
                                         thumb_url=_source_thumb_url)
+            if on_sent:
+                try:
+                    on_sent(fpath, size)
+                except Exception:
+                    pass
         elif dest == "drive":
             throttled_edit(client, chat_id, msg_id, "☁️ Uploading to Drive…", markup=cancel_kb(task_id), force=True)
             dinfo = drive.upload_file_full(fpath, task_id=task_id, rename=rename,
@@ -1162,8 +1682,13 @@ def run_leech_job(client, chat_id, msg_id, url, task_id, reply_to, dest, zip_out
                     InlineKeyboardButton("🗑 Delete", callback_data=f"qdel:{dinfo['id']}"),
                 ]])
 
-        summary = (f"✅ <b>{esc(os.path.basename(fpath))}</b>\n"
-                   f"📦 <code>{fmtsz(size)}</code> → {config.DEST_LABEL[dest]}")
+        pref = progress_prefix_fn() if progress_prefix_fn else ""
+        if pref:
+            pref += "\n"
+        summary = (f"{pref}✅ <b>{esc(os.path.basename(fpath))}</b>\n"
+                   f"📦 <code>{fmtsz(size)}</code>"
+                   + (f" • 🎬 {qline}" if qline else "") +
+                   f" → {config.DEST_LABEL[dest]}")
         if folder and dest == "drive":
             summary += f" 📁<code>{esc(folder)}</code>"
         title = (info or {}).get("title") if isinstance(info, dict) else None
@@ -1171,8 +1696,20 @@ def run_leech_job(client, chat_id, msg_id, url, task_id, reply_to, dest, zip_out
             summary = f"🎬 {esc(str(title)[:80])}\n{summary}"
         if links:
             summary += "\n" + "\n".join(links)
-        throttled_edit(client, chat_id, msg_id, summary, markup=file_kb, force=True)
-        autoclean_if_enabled(client, chat_id, msg_id, reply_to, dest)
+        summary += f"\n⏱ {fmt_time(int(time.time() - t_start))}"
+        # in batch mode the per-link completion is attached to the batch
+        # log (with its Drive buttons when mirrored); the final batch
+        # summary lands as its own message. A single link keeps the
+        # classic in-place summary with its buttons.
+        if cleanup:
+            throttled_edit(client, chat_id, msg_id, summary, markup=file_kb, force=True)
+            autoclean_if_enabled(client, chat_id, msg_id, reply_to, dest)
+        elif file_kb:
+            batch_done_kb = file_kb
+            try:
+                app.edit_message_reply_markup(chat_id, msg_id, reply_markup=batch_done_kb)
+            except Exception as e:
+                logger.warning(f"batch per-link buttons skipped: {e}")
 
     except engine.CancelledError:
         throttled_edit(client, chat_id, msg_id, "🛑 Cancelled.", force=True)
@@ -1183,7 +1720,13 @@ def run_leech_job(client, chat_id, msg_id, url, task_id, reply_to, dest, zip_out
         throttled_edit(client, chat_id, msg_id, f"❌ Failed: <code>{esc(str(e)[:300])}</code>", force=True)
     finally:
         state.drop_job(task_id)
-        shutil.rmtree(task_dir, ignore_errors=True)
+        # was missing (unlike every other job type) — ACTIVE_URLS kept every
+        # finished task's URL in RAM forever on this long-running process
+        state.drop_url_by_task(task_id)
+        if cleanup:
+            # batch jobs keep the shared task_dir until the WHOLE batch ends
+            # (run_batch_leech_job's own finally does the cleanup)
+            shutil.rmtree(task_dir, ignore_errors=True)
 
 
 # ── Auto-leech: any message containing a link, no command required ─────
@@ -1211,12 +1754,15 @@ def auto_leech(client, message):
         if isinstance(kind, tuple) and kind[0] == "drive_rename":
             from .handlers_drive import handle_drive_rename
             return handle_drive_rename(client, message, kind[1], target)
-        if kind == "drive_rename":
-            from .handlers_drive import handle_drive_rename
-            return handle_drive_rename(client, message, state.DEFAULT_ACCOUNT, target)
         if kind == "drive_newfolder":
             from .handlers_drive import handle_drive_new_folder
             return handle_drive_new_folder(client, message, target)
+        if kind == "drive_page":
+            from .handlers_drive import handle_drive_page_jump
+            return handle_drive_page_jump(client, message, target)
+        if kind == "unzipmulti_collect":
+            from .handlers_zip import handle_multi_collect
+            return handle_multi_collect(client, message, target)
 
     # Live shell owns plain text while a session is open (admin only) —
     # this is what makes /sh a continuous terminal instead of one-shot runs.
@@ -1238,12 +1784,29 @@ def auto_leech(client, message):
 
     # Same grammar as /m: "| name" rename and "#folder" Drive routing.
     # Media pages get the quality picker exactly like /l (never a silent
-    # degraded 360p download).
-    from .utils import parse_payload
+    # degraded 360p download) — but Instagram is checked FIRST and always
+    # goes to gallery-dl: instagram.com also sits in YTDLP_AUTO_HOSTS, so
+    # without this check the bare paste was shadowed into the yt-dlp
+    # picker (which then dies with "No video formats found!").
+    from .utils import parse_payload, split_ytdlp_format
     _, rename, folder = parse_payload(text)
+    text, ytdlp_format = split_ytdlp_format(text)
     host = _host_of(url)
+    # Google Drive hosts route through dispatch_link's Drive branch — they
+    # must NEVER reach the yt-dlp picker (a drive.usercontent.google.com
+    # download link used to get grabbed by yt-dlp's generic extractor,
+    # which was the "why is a Drive link managed by yt-dlp" report)
+    if host in ("drive.google.com", "drive.usercontent.google.com", "docs.google.com"):
+        return dispatch_link(client, message, url, "telegram", rename=rename, folder=folder,
+                             format_selector=ytdlp_format)
+    if any(host == h or host.endswith("." + h) for h in config.IG_HOSTS):
+        return dispatch_link(client, message, url, "telegram", rename=rename, folder=folder)
     is_media_page = any(host == h or host.endswith("." + h) for h in config.YTDLP_AUTO_HOSTS)
     if is_media_page:
+        if ytdlp_format:
+            return dispatch_link(client, message, url, "telegram", rename=rename,
+                                 folder=folder, format_selector=ytdlp_format)
         return show_quality_picker(client, message, url, "telegram", False,
                                     rename=rename, folder=folder)
-    dispatch_link(client, message, url, "telegram", rename=rename, folder=folder)
+    dispatch_link(client, message, url, "telegram", rename=rename, folder=folder,
+                  format_selector=ytdlp_format)

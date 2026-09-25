@@ -1,12 +1,12 @@
-import os, time, shutil, subprocess, threading
+import time, shutil, subprocess, threading
 
 from pyrogram import filters
 
-from . import config, state, drive, log
+from . import config, state, build_info
 from .core import app
 from .utils import fmt_time, guarded, safe_edit, esc
 from .handlers_core import Authorized, AdminOnly
-from .handlers_shell import register_shell_handlers, SHELL_COMMAND_NAMES
+from .handlers_shell import register_shell_handlers
 
 
 @app.on_message(filters.command("stats") & Authorized)
@@ -25,9 +25,11 @@ def cmd_stats(client, message):
         f"📊 <b>Stats</b>\n\n"
         f"💾 Disk: <code>{free} MB</code> free / <code>{total} MB</code>\n"
         f"🧠 RAM: <code>{rss} MB</code> used by bot\n"
+        f"⚡ Crypto: " + ("<b>native (fast)</b>" if _crypto_ok() else "<i>pure-Python fallback — uploads ~2-3x slower!</i>") + "\n"
         f"⚙️ Active: <code>{len(jobs)}</code> | Queued: <code>{state.task_queue.qsize()}</code>\n"
         f"☁️ Drive accounts: <code>{len(config.DRIVE_ACCOUNTS)}</code>"
         + (f" (this chat: <code>{state.get_drive_account(message.chat.id)}</code>)" if config.DRIVE_ACCOUNTS else "")
+        + f"\n🏷 Build: <code>{esc(build_info.build_line())}</code>"
         + "\n\n<b>Active jobs:</b>\n" + ("\n".join(lines) if lines else "  <i>none</i>"),
     )
 
@@ -41,6 +43,13 @@ def _rss_mb():
     except OSError:
         pass
     return 0
+
+
+def _crypto_ok():
+    """True when native TgCrypto is actually in use — the single most
+    common cause of 'uploads are extremely slow' is this being False."""
+    from . import crypto_guard
+    return crypto_guard.enabled()
 
 
 @app.on_message(filters.command("clean") & Authorized)
@@ -118,26 +127,6 @@ def _legacy_sh(client, message):
 # handler ordering inside that module.
 register_shell_handlers(app, AdminOnly, guarded, on_one_shot=_legacy_sh)
 
+# /updateyt removed (user request): yt-dlp is no longer auto-updated or
+# hot-swapped — a restart picks up whatever version the deploy installed.
 
-@app.on_message(filters.command(["updateyt", "ytupdate"]) & AdminOnly)
-@guarded
-def cmd_update_ytdlp(client, message):
-    from . import engine, state as state_mod
-    msg = message.reply_text("🔄 Checking for a yt-dlp update…")
-    with state_mod.jobs_lock:
-        idle = not state_mod.ACTIVE_JOBS
-    if not idle:
-        safe_edit(client, message.chat.id, msg.id,
-                  "⚠️ Jobs are currently running — updating the package now, but the "
-                  "restart needed to actually load it will happen automatically once "
-                  "everything's idle (or run <code>/updateyt</code> again later).")
-    before, after = engine.update_yt_dlp(restart_on_update=idle)
-    if before == after:
-        safe_edit(client, message.chat.id, msg.id, f"✅ Already up to date — yt-dlp <code>{after}</code>.")
-    elif idle:
-        # Process re-execs itself on update — this message likely won't
-        # even get a chance to send before the restart happens.
-        pass
-    else:
-        safe_edit(client, message.chat.id, msg.id,
-                  f"📦 Updated yt-dlp <code>{before}</code> → <code>{after}</code> (installed; restart pending until idle).")

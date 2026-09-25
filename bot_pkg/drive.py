@@ -17,7 +17,6 @@ _srv_lock = threading.Lock()
 def enabled():
     return bool(config.DRIVE_ACCOUNTS)
 
-_srv_lock = threading.Lock()
 # ONE process-wide lock around every googleapiclient call: the shared
 # service object's httplib2 transport is NOT thread-safe — concurrent
 # requests from IG-archive workers + datastore mirrors corrupted the heap
@@ -41,6 +40,8 @@ def get_service(account=None):
             return cached
     from google.oauth2.credentials import Credentials
     from googleapiclient.discovery import build
+    from googleapiclient.http import build_http
+    from google_auth_httplib2 import AuthorizedHttp
     with _api_lock:
         a = config.DRIVE_ACCOUNTS[name]
         creds = Credentials(
@@ -49,7 +50,18 @@ def get_service(account=None):
             client_id=a["client_id"], client_secret=a["client_secret"],
             scopes=["https://www.googleapis.com/auth/drive"],
         )
-        srv = build("drive", "v3", credentials=creds, static_discovery=False, cache_discovery=False)
+        # CRITICAL: build via googleapiclient's own build_http(), NOT a bare
+        # httplib2.Http(timeout=300). build_http() removes 308 from
+        # httplib2's redirect codes — Drive's resumable protocol answers
+        # every chunk with 308 "Resume Incomplete" (no Location header),
+        # and with 308 left in the redirect set httplib2 raises
+        # "Redirected but the response is missing a Location: header" on
+        # EVERY chunk (the systematic upload failure). A 300s socket
+        # timeout ceiling is then layered on top to kill true dead hangs.
+        http = AuthorizedHttp(creds, build_http())
+        http.timeout = 300
+        srv = build("drive", "v3", http=http, static_discovery=False,
+                    cache_discovery=False)
     with _srv_lock:
         _srv_cache[key] = srv
     return srv
@@ -66,6 +78,30 @@ def api_locked():
             _api_lock.release()
             return False
     return _Ctx()
+
+def _with_retry(fn, attempts=3):
+    """Retries a READ-ONLY Drive API closure on transport failures (broken
+    pipe / connection reset / timeout / redirect glitch on a stale
+    keep-alive socket — the '[Errno 32] Broken pipe' the /drive browser
+    hit). Each attempt calls fn() which re-fetches the service; a failed
+    attempt clears the whole service cache so the next attempt builds
+    FRESH connections. Never used for uploads (those are resumable and
+    retry internally)."""
+    import time as _t
+    import httplib2 as _h2
+    last = None
+    for i in range(attempts):
+        try:
+            return fn()
+        except (BrokenPipeError, ConnectionError, TimeoutError, OSError,
+                _h2.HttpLib2Error) as e:
+            last = e
+            logger.warning(f"Drive transport error (attempt {i + 1}/{attempts}): {e}")
+            with _srv_lock:
+                _srv_cache.clear()
+            _t.sleep(1 + i)
+    raise last
+
 
 def _root_id(chat_id):
     """Uploads go to the chat's chosen account root (or DRIVE_FOLDER_ID if set)."""
@@ -151,7 +187,7 @@ def upload_named_file(name, local_path):
         resp = srv.files().create(body=meta, media_body=media, fields="id").execute()
         return resp["id"]
 
-def list_files(query_extra=None, page_size=20):
+def list_files(query_extra=None, page_size=20, account=None):
     """Lists files at the configured root level."""
     with _api_lock:
         srv = get_service()
@@ -169,15 +205,18 @@ def list_files(query_extra=None, page_size=20):
         ).execute()
         return res.get("files", [])
 
-def search_files(name_contains, page_size=20):
+def search_files(name_contains, page_size=20, account=None):
     safe = name_contains.replace("'", "\\'")
-    return list_files(query_extra=f"name contains '{safe}'", page_size=page_size)
+    return list_files(query_extra=f"name contains '{safe}'", page_size=page_size, account=account)
 
-# One Drive upload at a time, process-wide: googleapiclient's httplib2
-# transport is not reliably thread-safe under concurrent resumable uploads
-# (observed heap corruption "free(): corrupted unsorted chunks" on Sevalla
-# when an IG archive and a settings mirror uploaded simultaneously).
-_UPLOAD_SEMA = threading.Semaphore(1)
+# Drive uploads: process-wide semaphore (see config.DRIVE_UPLOAD_CONCURRENCY).
+# googleapiclient's httplib2 transport is not reliably thread-safe under
+# concurrent resumable uploads (observed heap corruption "free(): corrupted
+# unsorted chunks" on Sevalla when an IG archive and a settings mirror
+# uploaded simultaneously). Default 1 = strictly serial; the download side
+# keeps running regardless, so a not-yet-uploaded backlog accumulates on
+# disk until each file's turn (deleted the moment ITS upload completes).
+_UPLOAD_SEMA = threading.Semaphore(max(1, config.DRIVE_UPLOAD_CONCURRENCY))
 
 
 def upload_file(fpath, progress_cb=None, task_id=None, rename=None, folder=None,
@@ -190,11 +229,30 @@ def upload_file(fpath, progress_cb=None, task_id=None, rename=None, folder=None,
 
 def upload_file_full(fpath, progress_cb=None, task_id=None, rename=None,
                      folder=None, chat_id=None, account=None, make_public=True):
-    """Serialized wrapper: one Drive upload at a time (see _UPLOAD_SEMA)."""
-    with _UPLOAD_SEMA:
-        return _upload_file_full_impl(fpath, progress_cb=progress_cb, task_id=task_id,
-                                       rename=rename, folder=folder, chat_id=chat_id,
-                                       account=account, make_public=make_public)
+    """Serialized wrapper: DRIVE_UPLOAD_CONCURRENCY uploads at a time, with
+    automatic retries on transport-level failures (httplib2's
+    'Redirected but the response is missing a Location: header' glitch,
+    broken pipes, resets). The impl resumes resumable sessions in-place;
+    this outer loop rebuilds the session from scratch as a last resort."""
+    import time as _t
+    import httplib2 as _h2
+    last = None
+    for attempt in range(3):
+        try:
+            with _UPLOAD_SEMA:
+                return _upload_file_full_impl(fpath, progress_cb=progress_cb, task_id=task_id,
+                                              rename=rename, folder=folder, chat_id=chat_id,
+                                              account=account, make_public=make_public)
+        except (BrokenPipeError, ConnectionError, TimeoutError, OSError,
+                _h2.HttpLib2Error) as e:
+            last = e
+            logger.warning(f"Drive upload transport error (attempt {attempt + 1}/3): {e}")
+            with _srv_lock:
+                _srv_cache.clear()   # force a fresh transport next attempt
+            _t.sleep(2)
+        except Exception:
+            raise
+    raise last
 
 
 def _upload_file_full_impl(fpath, progress_cb=None, task_id=None, rename=None,
@@ -226,7 +284,14 @@ def _upload_file_full_impl(fpath, progress_cb=None, task_id=None, rename=None,
             rename = rename + ext
         name = rename
     else:
-        name = base
+        # strip yt-dlp's trailing " [id]" suffix from the DISPLAY name —
+        # generic-extractor ids are 32-char hash strings, ugly in Drive
+        # listings. The file on disk keeps its name (collision safety);
+        # only the Drive copy gets the clean one.
+        import re as _re
+        name = _re.sub(r"\s*\[[0-9A-Za-z_-]{16,64}\]$",
+                       "", os.path.splitext(base)[0]).strip() or base
+        name += ext
 
     meta = {"name": name}
     if folder:
@@ -236,18 +301,36 @@ def _upload_file_full_impl(fpath, progress_cb=None, task_id=None, rename=None,
     elif config.DRIVE_FOLDER_ID:
         meta["parents"] = [config.DRIVE_FOLDER_ID]
 
-    media = MediaFileUpload(fpath, chunksize=50 * 1024 * 1024, resumable=True)
+    media = MediaFileUpload(fpath, chunksize=16 * 1024 * 1024, resumable=True)
     req = srv.files().create(body=meta, media_body=media, fields="id, webViewLink")
     response = None
+    import time as _t
+    import httplib2 as _h2
+    transport_fails = 0
     while response is None:
         if task_id and state.is_cancelled(task_id):
             logger.info(f"[{task_id}] Drive upload cancelled by user")
             raise CancelledError("drive upload cancelled by user")
-        # next_chunk holds the socket for up to a 50MB chunk — hold the API
+        # next_chunk holds the socket for up to a 16MB chunk — hold the API
         # lock across the whole resumable loop so no other thread touches
         # this service's transport mid-request.
         with _api_lock:
-            status, response = req.next_chunk(num_retries=3)
+            try:
+                status, response = req.next_chunk(num_retries=3)
+            except (_h2.HttpLib2Error, ConnectionError, TimeoutError, OSError) as e:
+                # Transient glitch on a chunk POST (e.g. httplib2's
+                # "Redirected but the response is missing a Location: header"
+                # when Google answers a 308 oddly, or a stale socket). The
+                # resumable protocol resumes from the last ACKNOWLEDGED byte
+                # — nothing is re-uploaded. Cap at 6; beyond that the outer
+                # upload_file_full retry rebuilds the session from scratch.
+                transport_fails += 1
+                if transport_fails > 6:
+                    raise
+                logger.warning(f"Drive upload transport glitch #{transport_fails} ({e}) "
+                               f"— resuming resumable session")
+                _t.sleep(2 * transport_fails)
+                continue
         if status and progress_cb:
             progress_cb(int(status.resumable_progress), int(status.total_size or 0))
     if make_public:
@@ -260,27 +343,27 @@ def _upload_file_full_impl(fpath, progress_cb=None, task_id=None, rename=None,
     logger.info(f"Drive[{acct}] upload done — {fpath} -> {link}")
     return {"id": response["id"], "link": link}
 
-def delete_file(file_id):
+def delete_file(file_id, account=None):
     with _api_lock:
-        srv = get_service()
+        srv = get_service(account)
         if not srv:
             return False
         srv.files().delete(fileId=file_id).execute()
         logger.info(f"Drive file deleted: {file_id}")
         return True
 
-def rename_file(file_id, new_name):
+def rename_file(file_id, new_name, account=None):
     with _api_lock:
-        srv = get_service()
+        srv = get_service(account)
         if not srv:
             return False
         srv.files().update(fileId=file_id, body={"name": new_name}).execute()
         logger.info(f"Drive file {file_id} renamed to '{new_name}'")
         return True
 
-def get_file(file_id):
+def get_file(file_id, account=None):
     with _api_lock:
-        srv = get_service()
+        srv = get_service(account)
         if not srv:
             return None
         try:
@@ -289,32 +372,34 @@ def get_file(file_id):
             logger.warning(f"Drive get_file failed for {file_id}: {e}")
             return None
 
-def list_folder_full(folder_id, max_total=2000):
+def list_folder_full(folder_id, max_total=10000, account=None):
     """Fetches every item directly inside folder_id (files AND subfolders),
     paginating internally. The UI slices this client-side rather than
     chaining Drive's own pageToken, since that only supports stepping
     forward — client-side slicing lets the browser jump to any page
     directly and supports real folder navigation with a back button."""
-    with _api_lock:
-        srv = get_service()
-        if not srv:
-            return []
-        q = f"'{folder_id}' in parents and trashed = false"
-        files, page_token = [], None
-        while True:
-            res = srv.files().list(
-                q=q, fields="nextPageToken, files(id, name, mimeType, size, webViewLink)",
-                pageSize=200, orderBy="folder,name_natural", pageToken=page_token,
-            ).execute()
-            files.extend(res.get("files", []))
-            page_token = res.get("nextPageToken")
-            if not page_token or len(files) >= max_total:
-                break
-        return files[:max_total]
+    def once():
+        with _api_lock:
+            srv = get_service(account)
+            if not srv:
+                return []
+            q = f"'{folder_id}' in parents and trashed = false"
+            files, page_token = [], None
+            while True:
+                res = srv.files().list(
+                    q=q, fields="nextPageToken, files(id, name, mimeType, size, webViewLink)",
+                    pageSize=200, orderBy="folder,name_natural", pageToken=page_token,
+                ).execute()
+                files.extend(res.get("files", []))
+                page_token = res.get("nextPageToken")
+                if not page_token or len(files) >= max_total:
+                    break
+            return files[:max_total]
+    return _with_retry(once)
 
-def create_folder(name, parent_id):
+def create_folder(name, parent_id, account=None):
     with _api_lock:
-        srv = get_service()
+        srv = get_service(account)
         if not srv:
             return None
         meta = {"name": name, "mimeType": "application/vnd.google-apps.folder", "parents": [parent_id]}
@@ -339,32 +424,47 @@ def get_file_any(file_id):
             logger.warning(f"Drive get_file_any failed for {file_id}: {e}")
             return None
 
-def list_folder_any(folder_id, max_total=2000):
+def list_folder_any(folder_id, max_total=20000):
     """Like list_folder_full, but for a shared folder that isn't ours."""
-    with _api_lock:
-        srv = get_service()
-        if not srv:
-            return []
-        q = f"'{folder_id}' in parents and trashed = false"
-        files, page_token = [], None
-        while True:
-            res = srv.files().list(
-                q=q, fields="nextPageToken, files(id, name, mimeType, size, webViewLink)",
-                pageSize=200, orderBy="folder,name_natural", pageToken=page_token,
-                supportsAllDrives=True, includeItemsFromAllDrives=True,
-            ).execute()
-            files.extend(res.get("files", []))
-            page_token = res.get("nextPageToken")
-            if not page_token or len(files) >= max_total:
-                break
-        return files[:max_total]
+    def once():
+        with _api_lock:
+            srv = get_service()
+            if not srv:
+                return []
+            q = f"'{folder_id}' in parents and trashed = false"
+            files, page_token = [], None
+            while True:
+                res = srv.files().list(
+                    q=q, fields="nextPageToken, files(id, name, mimeType, size, webViewLink)",
+                    pageSize=200, orderBy="folder,name_natural", pageToken=page_token,
+                    supportsAllDrives=True, includeItemsFromAllDrives=True,
+                ).execute()
+                files.extend(res.get("files", []))
+                page_token = res.get("nextPageToken")
+                if not page_token or len(files) >= max_total:
+                    break
+            return files[:max_total]
+    return _with_retry(once)
 
-def download_file_content(file_id, dest_path, task_id=None, mime_type=None):
+def download_file_content(file_id, dest_path, task_id=None, mime_type=None, progress_cb=None):
     """Downloads a Drive file's actual bytes to dest_path via the API
     (using our own OAuth credentials — much more reliable than yt-dlp's
     anonymous GoogleDrive extractor, which frequently 400s on ordinary
     shared links). Google-native docs (Sheets/Docs/Slides) get exported
-    to a normal file format instead, since they have no raw bytes."""
+    to a normal file format instead, since they have no raw bytes.
+
+    ATOMIC DELIVERY: bytes land in dest_path + ".part" and are renamed
+    into place only when the download is complete. MediaIoBaseDownload
+    writes in large (50MB) chunks with multi-second gaps between them —
+    without this, a LiveDispatcher watching the folder "2s untouched"
+    check would grab the HALF-DOWNLOADED file and upload it: the striped
+    uploader then hit FILE_PART_INVALID on short reads at the growing
+    EOF, and the delivered partial MP4 had no readable metadata (moov
+    not yet written) — hence "100MB video with no thumbnail". The
+    ".part" suffix is already in LiveDispatcher's SKIP_SUFFIXES."""
+    # NOTE: the global lock is held only for setup and per-chunk
+    # below — holding it for the whole multi-GB fetch used to serialize
+    # ALL other Drive traffic (browser, uploads) behind one download.
     with _api_lock:
         srv = get_service()
         if not srv:
@@ -386,11 +486,37 @@ def download_file_content(file_id, dest_path, task_id=None, mime_type=None):
         else:
             request = srv.files().get_media(fileId=file_id, supportsAllDrives=True)
 
-        with open(dest_path, "wb") as fh:
-            downloader = MediaIoBaseDownload(fh, request, chunksize=50 * 1024 * 1024)
+    partial = dest_path + ".part"
+    try:
+        with open(partial, "wb") as fh:
+            # 16MB chunks (was 50MB): googleapiclient buffers the whole
+            # chunk in RAM per next_chunk() call — on the OOM-prone
+            # container the 50MB buffer, stacked on pyrogram + any
+            # overlapping upload, is part of the restart profile.
+            # 16MB resumable chunks are just as fast on normal links.
+            downloader = MediaIoBaseDownload(fh, request, chunksize=16 * 1024 * 1024)
             done = False
             while not done:
                 if task_id and state.is_cancelled(task_id):
                     raise state.CancelledError("cancelled by user")
-                _, done = downloader.next_chunk(num_retries=3)
-        return dest_path
+                # Per-chunk lock only: one slow download used to serialize
+                # EVERY other Drive call (browser, uploads) behind it for
+                # minutes. The transport object is thread-local (one
+                # service per thread), so locking just the chunk keeps the
+                # heap-corruption invariant without the stall.
+                with _api_lock:
+                    status, done = downloader.next_chunk(num_retries=3)
+                if progress_cb:
+                    try:
+                        progress_cb(int(getattr(status, "resumable_progress", 0) or 0),
+                                    int(getattr(downloader, "total_size", 0) or 0))
+                    except Exception:
+                        pass
+        os.replace(partial, dest_path)
+    except BaseException:
+        try:
+            os.remove(partial)
+        except OSError:
+            pass
+        raise
+    return dest_path

@@ -4,20 +4,21 @@ from . import log
 from .utils import guarded, esc
 from .core import app
 from .handlers_core import Authorized, AdminOnly
-from .handlers_shell import SHELL_COMMAND_NAMES
 
 logger = log.get(__name__)
 
 KNOWN_COMMANDS = [
-    "start", "help", "m", "l", "zm", "zl", "yt", "y", "ytdl", "ytdlleech", "yl", "ym", "ytl",
-    "ig", "igm", "igl", "igindex", "igindexes", "setthumb", "removethumb",
+    "start", "help", "m", "l", "zm", "zl", "yt", "y", "ytdl", "ytdlleech", "yl", "ym", "ytm", "ytl",
+    "ig", "igm", "igl", "igindex", "igindexes",
     "torrent", "gallery", "clone",
-    "zipl", "zipm", "unzipl", "unzipm",
+    "zipl", "zipm", "unzip", "unzipl", "unzipm", "unzipmulti",
+    "gallery", "g", "galleryl", "gm", "gallerym", "galleryz", "galleryzm",
+    "clone", "clonem",
     "cookie", "settings", "drive", "drivesearch", "drivelist", "driveaccounts",
     "stats", "clean", "cancel", "cancelall", "ca", "sh", "shell", "shc", "shexit", "shq",
-    "allow", "ban", "updateyt", "ytupdate",
+    "allow", "ban",
 ]
-ADMIN_COMMANDS = ["allow", "ban", "cancelall", "ca", "updateyt", "ytupdate",
+ADMIN_COMMANDS = ["allow", "ban", "cancelall", "ca",
                   "shc", "shexit", "shq", "drivelogin", "addaccount",
                   "tokenup", "tokenpaste"]
 

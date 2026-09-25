@@ -67,9 +67,6 @@ os.makedirs(COOKIES_DIR, exist_ok=True)
 # Per-user, per-type Instagram index ledgers (data/indexes/<user>.<type>.txt)
 INDEX_DIR     = os.path.join(DATA_DIR, "indexes")
 os.makedirs(INDEX_DIR, exist_ok=True)
-# Custom per-chat upload thumbnails (WZML-X /setthumb parity)
-THUMBS_DIR    = os.path.join(DATA_DIR, "thumbs")
-os.makedirs(THUMBS_DIR, exist_ok=True)
 
 MIN_FREE_MB = 300
 
@@ -78,8 +75,35 @@ MIN_FREE_MB = 300
 # no "native" way past it without switching to a user account.
 TG_MAX_FILE_BYTES = 2 * 1000 * 1000 * 1000  # ~2GB
 
-UPLOAD_WORKERS = 3
-QUEUE_WORKERS  = 4
+# Concurrent per-job upload workers (LiveDispatcher). Default 2: with the
+# RAM gates in place (striped auto-fallback, thumb skip, 16MB Drive chunks,
+# ffmpeg -threads 2) two concurrent sends are safe and give ~2x throughput
+# on multi-file jobs (albums + big files overlap with the download).
+UPLOAD_WORKERS = int(os.environ.get("UPLOAD_WORKERS", "2") or 2)
+
+# Concurrent DRIVE uploads, process-wide. Default 2: per-thread service
+# objects removed the shared-transport corruption that forced 1 for a
+# while; 2 doubles Drive-mirror throughput. Drop back to 1 in .env if you
+# ever see instability.
+DRIVE_UPLOAD_CONCURRENCY = int(os.environ.get("DRIVE_UPLOAD_CONCURRENCY", "2") or 2)
+# Concurrent job workers (each = one download+upload pipeline). On a
+# memory-tight host, 2 keeps the bot responsive to new commands while
+# halving worst-case concurrent subprocess/buffer load vs the old
+# hardcoded 4 — raise via env if you serve many chats at once.
+QUEUE_WORKERS = int(os.environ.get("QUEUE_WORKERS", "2") or 2)
+# asyncio.to_thread pool for message/callback handlers (see utils.guarded).
+# Must comfortably exceed the number of simultaneously-slow things a handler
+# can legally do (yt-dlp probes, Drive listings, ffprobe) so taps and
+# commands never queue behind them.
+# BUG (crash on deploy): a blank env var (e.g. HANDLER_WORKERS= copied
+# verbatim from .env.example, common on platforms that always set every
+# declared key) makes os.environ.get(name, default) return "" — the
+# EMPTY STRING, not the default — since .get()'s default only applies
+# when the key is absent, not when it's present-but-blank. int("") then
+# raises ValueError and kills the bot before it can even start. Same
+# fix as API_ID above: `or <default>` catches "" too, since empty
+# string is falsy.
+HANDLER_WORKERS = int(os.environ.get("HANDLER_WORKERS", "16") or 16)
 
 # ── Link classification ─────────────────────────────────────────────────
 # Anything on this list, pasted with no command, gets auto-leeched.
@@ -102,14 +126,15 @@ YTDLP_AUTO_HOSTS = (
 )
 
 DIRECT_FILE_EXT = (
-    ".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v",
+    ".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v", ".ts",
     ".mp3", ".flac", ".m4a", ".wav", ".ogg", ".opus",
-    ".jpg", ".jpeg", ".png", ".gif", ".webp",
-    ".zip", ".rar", ".7z",
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp",
+    ".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz",
+    ".bin", ".iso", ".pdf", ".apk", ".exe", ".deb", ".rpm", ".epub",
 )
 
-URL_RE = __import__("re").compile(r"https?://\S+")
-MAGNET_RE = __import__("re").compile(r"magnet:\?xt=urn:btih:[A-Za-z0-9]+\S*")
+URL_RE = re.compile(r"https?://\S+")
+MAGNET_RE = re.compile(r"magnet:\?xt=urn:btih:[A-Za-z0-9]+\S*")
 
 DEST_LABEL = {"telegram": "📱 Telegram", "drive": "☁️ Drive"}
 
@@ -120,7 +145,10 @@ SHELL_TIMEOUT_S = 60
 # If a subprocess job (torrent/gallery/clone) produces no output at all for
 # this long, treat it as stalled and stop it rather than hang forever —
 # e.g. a torrent with zero peers, or a site blocking gallery-dl silently.
-STALL_TIMEOUT_S = 240
+# 10 minutes: Instagram rate-limit waits routinely sit silent for several
+# minutes and ARE still making progress (v15-v17 killed healthy archives
+# at 4 minutes, which looked like "stuck in a certain step").
+STALL_TIMEOUT_S = 600
 
 # Optional raw yt-dlp option overrides, as a JSON object, e.g. in .env:
 #   YT_DLP_OPTIONS={"writesubtitles": true, "subtitleslangs": ["en"]}

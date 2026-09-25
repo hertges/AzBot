@@ -1,17 +1,22 @@
 """Add & switch Drive accounts from Telegram via Google's OAuth 2.0
-**device flow** — no console, no redirect URLs:
+**authorization-code copy/paste flow** — no console needed beyond a
+one-time client ID/secret:
 
-    /drivelogin <name>   → bot shows a google.com/device code + link
-    (user opens it, signs in, types the code)
-    → bot polls in the background, saves the refresh token as
-      GDrive_<name>_REFRESH_TOKEN into data/overrides.json and registers
-      the account live.
+    /drivelogin <name>   → bot shows a Google sign-in URL
+    (user opens it, signs in, approves, lands on a dead page)
+    → user copies the full address-bar URL (contains ?code=...) back to
+      the bot → bot exchanges it for a refresh token, saves it as
+      GDrive_<name>_REFRESH_TOKEN into data/overrides.json, and
+      registers the account live.
+
+/tokenup <name> is the alternative for clients that can't do the
+copy/paste dance: paste a refresh token generated on a PC (gen_token.py).
 
 Requires GDrive_<name>_CLIENT_ID/_CLIENT_SECRET to already exist in .env
 (client credentials can't be created by a bot), OR the shared
 GCP_CLIENT_ID/GCP_CLIENT_SECRET pair — that is reused for new accounts.
 """
-import os, re, time, threading, json
+import os, re
 from urllib.parse import urlencode
 
 from pyrogram import filters
@@ -19,16 +24,13 @@ from pyrogram import filters
 from . import config, state, drive, datastore, log
 from .core import app
 from .utils import guarded, esc, safe_edit
-from .handlers_core import Authorized, AdminOnly
+from .handlers_core import AdminOnly
 
 logger = log.get(__name__)
 
-DEVICE_URL = "https://accounts.google.com/device"
-TOKEN_URL = "https://oauth2.googleapis.com/token"
 SCOPES = "https://www.googleapis.com/auth/drive"
 
 OVERRIDES_FILE = os.path.join(config.DATA_DIR, "overrides.json")
-_pending = {}   # chat_id -> {name, device_code, user_code, interval, expires}
 
 
 def _client_pair(name):
@@ -48,7 +50,6 @@ def _save_override(name, refresh_token):
     state._save_json(OVERRIDES_FILE, data)
     # Mirror to the Drive datastore so tokens survive restarts/redeploys.
     try:
-        from . import datastore
         datastore.push_datafile(OVERRIDES_FILE, "overrides.json")
     except Exception as e:
         logger.warning(f"override mirror failed: {e}")
@@ -75,7 +76,6 @@ def _load_overrides_into_config():
     data = state._load_json(OVERRIDES_FILE, {})
     n = 0
     for key, tok in data.items():
-        m = key.match if False else None
         if not key.startswith("GDrive_") or not key.endswith("_REFRESH_TOKEN"):
             continue
         name = key[len("GDrive_"):-len("_REFRESH_TOKEN")]
@@ -99,7 +99,6 @@ def remove_account(name):
     del data[key]
     state._save_json(OVERRIDES_FILE, data)
     try:
-        from . import datastore
         datastore.push_datafile(OVERRIDES_FILE, "overrides.json")
     except Exception:
         pass
@@ -168,52 +167,6 @@ def cmd_drivelogin(client, message):
     start_device_login(client, message, parts[1].strip())
 
 
-def _poll_approval(chat_id=None):
-    """Polls the token endpoint until approved/expired."""
-    chat_id = next(iter(_pending), None) if chat_id is None else chat_id
-    p = _pending.get(chat_id)
-    if not p:
-        return
-    cid, csec = _client_pair(p["name"])
-    while time.time() < p["expires"]:
-        time.sleep(p["interval"])
-        try:
-            import requests as rq
-            r = rq.post(TOKEN_URL, data={
-                "client_id": cid, "client_secret": csec,
-                "device_code": p["device_code"],
-                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-            }, timeout=15)
-            d = r.json()
-        except Exception as e:
-            logger.warning(f"drivelogin poll error: {e}")
-            continue
-        if "refresh_token" in d:
-            try:
-                _register_account(p["name"], d["refresh_token"])
-            except Exception as e:
-                logger.exception("drivelogin register failed")
-                app.send_message(chat_id, f"❌ Registered but failed to activate: <code>{esc(e)}</code>")
-                _pending.pop(chat_id, None)
-                return
-            app.send_message(
-                chat_id,
-                f"✅ Drive account <b>{esc(p['name'])}</b> added!\n"
-                f"Switch chats to it in /settings → ☁️ Drive account.")
-            _pending.pop(chat_id, None)
-            return
-        err = d.get("error")
-        if err == "authorization_pending":
-            continue
-        if err == "slow_down":
-            p["interval"] += 5
-            continue
-        app.send_message(chat_id, f"❌ Login failed: <code>{esc(err or str(d)[:200])}</code>")
-        _pending.pop(chat_id, None)
-        return
-    app.send_message(chat_id, "⏱️ Device code expired — run /drivelogin again.")
-
-
 @app.on_message(filters.command(["tokenup", "tokenpaste"]) & AdminOnly)
 @guarded
 def cmd_tokenup(client, message):
@@ -266,9 +219,24 @@ def _exchange_auth_code(client, message, name, text):
     """Step 2 of the old-bot flow: user pasted the code or the redirect
     link — exchange it for a refresh token and register the account."""
     raw = (text or "").strip()
-    # accept either the bare code or a full redirect URL containing ?code=
-    m = re.search(r"[?&]code=([\w\-]+)", raw)
-    code = m.group(1) if m else raw.split()[0]
+    # Accept the bare code or a full redirect URL. Google codes look like
+    # 4/0A… — a bare [\w-]+ match truncates at the slash and the exchange
+    # always fails, so parse the query string properly.
+    code = raw.split()[0]
+    if "code=" in raw:
+        try:
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(raw).query)
+            if qs.get("code") and qs["code"][0].strip():
+                code = qs["code"][0].strip()
+            else:
+                m = re.search(r"[?&]code=([^&\s]+)", raw)
+                if m:
+                    code = m.group(1)
+        except Exception:
+            m = re.search(r"[?&]code=([^&\s]+)", raw)
+            if m:
+                code = m.group(1)
     cid, csec = _client_pair(name)
     if not cid:
         return message.reply_text("❌ Client credentials vanished — start again with /drivelogin.")

@@ -7,6 +7,96 @@ Telegram's MTProto layer via [Pyrogram](https://docs.pyrogram.org), not the
 HTTP Bot API, so files up to Telegram's real per-file limit for bots
 (~2GB) go through natively — no 50MB wall, no local Bot API server needed.
 
+## v18 changelog
+
+Aligned with WZML-X's actual implementation (source-verified, not guessed):
+
+- **Parallel MTProto uploads (`fast_upload.py`)** — the bot-only port of
+  WZML-X's tg_transfer idea: big files are striped across MULTIPLE media
+  sessions via raw `upload.SaveBigFilePart`, then sent with
+  `InputFileBig`. Stock pyrogram serializes every byte through ONE media
+  session (4 workers, queue depth 1) — that was your speed ceiling.
+  Bot-token-only, no premium/user session; anything <10MB, photos/webp,
+  or ANY failure automatically falls back to the stock path, so worst
+  case equals previous behavior. Tune with `UPLOAD_SESSIONS` /
+  `UPLOAD_WINDOW` in `.env`.
+- **yt-dlp de-pinned (WZML-X parity)**: removed our forced
+  `player_client=["tv","android","ios","web"]` and the aria2c
+  external-downloader hijack for YouTube. WZML-X forces neither; on 2026
+  YouTube those pins produce thin format tables ("only one quality") and
+  mid-download stalls. yt-dlp's own defaults handle this now. Added their
+  bounded retry sleeps (3s flat) so retries don't look like hangs.
+  `YT_DLP_OPTIONS` remains as escape hatch.
+- **Picker UX**: a single available quality no longer opens a one-button
+  menu — it downloads directly (WZML-X behavior).
+- **Instagram archives**: stall watchdog raised to 10 minutes AND the
+  status shows a live "waiting on Instagram (rate-limit wait)" heartbeat
+  instead of freezing silently — v15-v17 killed healthy archives after
+  4 quiet minutes.
+
+## v17 changelog
+
+Round 2 — from live runtime logs:
+
+- **Uploads were extremely slow**: the TgCrypto self-test called function
+  names that don't exist in pyrogram (`ige_encrypt`, `ctr256`), so it
+  failed on EVERY host where TgCrypto was installed and the guard blocked
+  perfectly healthy native crypto, forcing the pure-Python fallback
+  (~2-3x slower crypto on every byte). Self-test fixed against pyrogram's
+  real API (`ige256_*`, `ctr256_encrypt`). `/stats` now shows your active
+  crypto mode so this can never hide again.
+- **Dead buttons / commands with no answer / EditMessage timeouts**: all
+  handlers ran directly inside pyrogram's tiny default thread pool
+  (≈CPU-count threads). A single slow operation (YouTube format probe,
+  Drive listing waiting on the upload lock) starved that pool, so new
+  messages and button taps queued indefinitely. Handlers now run as
+  coroutines offloading into a dedicated 16-thread pool (`HANDLER_WORKERS`)
+  — the network loop and button handling stay responsive always.
+- **Quality selector showed fewer options than other bots**: (a) buttons
+  were deduplicated per resolution, hiding real formats — now one button
+  PER format id (exact size/container/codec/fps); (b) if a probe returns
+  only low resolutions while a cookie profile is active, the bot
+  automatically re-probes WITHOUT cookies (cookies often pin yt-dlp to a
+  basic client → 360p-only tables); (c) client list is configurable via
+  `YT_PLAYER_CLIENTS` in `.env`.
+- **Boot warning** `cannot access local variable 'drive'`: leftover local
+  imports shadowed the module-level one in datastore (broke boot-time
+  settings/cookie restore). All removed.
+- **/clean or the hourly purge loop could delete RUNNING jobs' folders**
+  mid-download. Purge now skips dirs owned by active jobs.
+- **Stop button gave no feedback**: tapping 🛑 now flips the message to
+  "Stop requested…" instantly.
+- **/drive silent while listing**: replies "☁️ Opening Drive…" immediately,
+  then fills in; failures show the actual error instead of silence.
+- Python 3.13 compatibility: pyrogram needs an event loop at Client()
+  construction; core.py now creates one when missing.
+
+## v16 changelog
+
+Fixes (all verified by `tests/sim_flows.py` — run it with any Python that has the deps):
+
+- **Random restarts during heavy jobs** (e.g. archives inside group topics):
+  the TgCrypto segfault-guard ran *after* Pyrogram was imported, so it could
+  never actually block the crashing C extension. It now runs in
+  `bot_pkg/__init__.py`, guaranteed to execute before any module can import
+  pyrogram/tgcrypto, with a loud warning if that order ever regresses.
+- **Bare Instagram links** opened the yt-dlp quality picker (then failed):
+  auto-leech checks Instagram hosts FIRST now; Instagram always goes to
+  gallery-dl. `/l <insta-link>` also works again instead of NameError-ing.
+- **Thumbnails missing**: source-video thumbnails are validated +
+  ffmpeg-converted to real JPEGs (webp/avif/truncated downloads used to
+  silently produce none). Priority: source cover > automatic frame grab
+  (thumbnails are fully automatic; there is no /setthumb).
+- **No quality shown**: every native video/audio upload gets a
+  `🎬 WxH • tier • duration` caption; completion summaries show the file's
+  real resolution/duration (IG archive summaries too).
+- Quality-picker buttons crashed when tapped (`_do_picker` scoping bug).
+- `/zipm` NameError (missing import); datastore NameErrors silently broke
+  settings/cookie/index Drive-mirroring; "Send to Telegram" in the /drive
+  browser crashed on tap; duplicate-URL guard could stick after gallery jobs;
+  disk-purge race in `ensure_free`.
+
+
 ## Setup
 
 1. Get `API_ID` / `API_HASH` from <https://my.telegram.org/apps> (required
@@ -224,12 +314,11 @@ this bot's architecture:
   behavior without touching code.
 - `/settings` → "Always send as document" — skips Telegram's video
   re-encoding/thumbnail generation, same idea as its `AS_DOCUMENT` setting.
-- **yt-dlp auto-update** — updates on startup, every 6 hours, and on demand
-  via `/updateyt`, restarting the bot to actually load the new version
-  (only when no jobs are running). This is the standard fix for YouTube
-  extraction errors like "The page needs to be reloaded" or "Sign in to
-  confirm you're not a bot" — they're almost always yt-dlp lagging
-  YouTube's changes, not something a cookie or config tweak fixes alone.
+- **yt-dlp is NOT auto-updated** (removed by user request): restart the
+  bot (after `pip install -U yt-dlp` or an image rebuild) to pick up a
+  newer version. YouTube extraction errors like "The page needs to be
+  reloaded" are almost always yt-dlp lagging YouTube's changes — update
+  and restart when they appear.
 - **`extractor_args` player_client fallback** (`tv`, `android`, `web`) —
   YouTube's default web client increasingly requires a PO token that
   yt-dlp can't always obtain; these clients don't, and this is the

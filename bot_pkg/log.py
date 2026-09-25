@@ -38,6 +38,26 @@ def setup():
     # at WARNING unless you're actually debugging Pyrogram itself.
     logging.getLogger("pyrogram").setLevel(logging.WARNING)
 
+    # User-initiated upload cancels: our progress callback raises
+    # state.CancelledError inside pyrogram's save_file worker, which logs
+    # it as ERROR with a full traceback before re-raising (we catch it and
+    # show 🛑). That's expected control flow, not an error — drop records
+    # whose exception is our CancelledError.
+    class _CancelNoiseFilter(logging.Filter):
+        def filter(self, record):
+            ei = record.exc_info
+            if ei and ei[0] is not None and ei[0].__name__ == "CancelledError" \
+                    and "cancel" in str(ei[1]).lower():
+                return False
+            return True
+
+    cancel_filter = _CancelNoiseFilter()
+    console.addFilter(cancel_filter)
+    try:
+        fileh.addFilter(cancel_filter)
+    except NameError:
+        pass  # file handler failed to open — console-only logging
+
     logging.getLogger(__name__).info(f"Logging ready — level={config.LOG_LEVEL}, file={config.LOG_FILE}")
 
 def get(name):
