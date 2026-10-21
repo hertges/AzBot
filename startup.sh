@@ -44,21 +44,23 @@ if [ ! -x "$VENV/bin/python" ]; then
 fi
 if [ -x "$VENV/bin/python" ]; then
     PYBIN="$VENV/bin/python"
-    PIP="$VENV/bin/pip"
+    # "-m pip" survives venvs created without pip (--without-pip); a bare
+    # $VENV/bin/pip does not always exist.
+    PIP="$PYBIN -m pip"
 else
     say "venv unavailable — falling back to the image's python"
     PYBIN="$PY"
-    PIP="pip3"
+    PIP="$PY -m pip"
 fi
 export PIP_ROOT_USER_ACTION=ignore
 PIPLOG="$HOME/.azbot-pip.log"
 
 pip_install() {  # $1 = requirements file
-    "$PIP" install --no-cache-dir -r "$1" >"$PIPLOG" 2>&1 && return 0
+    $PIP install --no-cache-dir -r "$1" >"$PIPLOG" 2>&1 && return 0
     # PEP 668 "externally managed" images need the override flag; older pip
     # rejects the flag, but we only reach here after the first attempt
     # already failed.
-    "$PIP" install --no-cache-dir --break-system-packages -r "$1" >>"$PIPLOG" 2>&1 && return 0
+    $PIP install --no-cache-dir --break-system-packages -r "$1" >>"$PIPLOG" 2>&1 && return 0
     return 1
 }
 
@@ -87,9 +89,21 @@ CACHE="$HOME/.azbot-cache"
 mkdir -p "$CACHE"
 
 fetch() {  # $1 = url, $2 = output file
-    curl -fsSL --retry 3 --connect-timeout 20 -o "$2" "$1" 2>/dev/null && return 0
-    wget -q -O "$2" "$1" 2>/dev/null && return 0
-    return 1
+    # curl first, wget second. If the image has NEITHER, bootstrap one:
+    # python's urllib is always there.
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --retry 3 --connect-timeout 20 -o "$2" "$1" 2>/dev/null && return 0
+    fi
+    if command -v wget >/dev/null 2>&1; then
+        wget -q -O "$2" "$1" 2>/dev/null && return 0
+    fi
+    "$PY" - "$1" "$2" <<'PYEOF' 2>/dev/null
+import shutil, sys, urllib.request
+url, dst = sys.argv[1], sys.argv[2]
+with urllib.request.urlopen(url, timeout=60) as r, open(dst, "wb") as f:
+    shutil.copyfileobj(r, f)
+PYEOF
+    [ -s "$2" ]
 }
 
 unpack() {  # $1 = archive, $2 = dest dir
