@@ -85,8 +85,13 @@ DATA_DRIVE_FOLDER=AzBotData # optional: folder holding settings.json + indexes
 Server sidebar → **Startup** → *Startup Command*:
 
 ```
-sh startup.sh
+sh "$(find . -maxdepth 3 -name startup.sh -print -quit)"
 ```
+
+That form works whether the panel clones the repo straight into the server
+home (`/home/container/startup.sh`) or into a subfolder
+(`/home/container/AzBot/startup.sh`). If you know which one you get, the
+short form works too — `sh startup.sh` or `sh AzBot/startup.sh`.
 
 Save (Ctrl+S). The script:
 
