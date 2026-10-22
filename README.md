@@ -113,6 +113,13 @@ docker build -t azleechbot .
 docker run --env-file .env -v $(pwd)/data:/app/data azleechbot
 ```
 
+Or on a Pterodactyl-style panel (Wispbyte, Pterodactyl, Pelican Panel…):
+clone this repo on the server, set the env vars in the panel, and use
+`sh startup.sh` as the startup command. It creates a venv, installs the
+deps, and fetches the binaries the panel image lacks (ffmpeg, aria2c, 7z,
+GNU wget) as static builds — no root needed. Full walkthrough:
+**[WISPBYTE.md](WISPBYTE.md)**.
+
 ## Mirror vs. leech
 
 Like the original bot, the destination is picked by which command you

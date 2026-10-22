@@ -30,22 +30,27 @@ except Exception:
 from . import crypto_guard
 crypto_guard.install()
 
-# ── only NOW may pyrogram (and therefore tgcrypto) load ──────────────────
-from pyrogram import Client
-from pyrogram.enums import ParseMode
-
-from . import state, log
-
 # pyrogram's Client() touches asyncio.get_event_loop() at construction
 # time; on Python 3.10+ that raises RuntimeError when no loop exists yet
 # (3.12 deprecation, removed auto-creation in 3.13+). Docker pins 3.12
 # where it still worked — but any 3.13 host would crash at import.
+#
+# This MUST sit ABOVE the pyrogram import: pyrogram/sync.py calls
+# get_event_loop() at ITS import time, so a loop created afterwards is too
+# late (Python 3.14 raises "There is no current event loop in thread
+# 'MainThread'" during `import pyrogram` itself).
 import asyncio
 try:
     _loop = asyncio.get_event_loop()
 except RuntimeError:
     _loop = asyncio.new_event_loop()
     asyncio.set_event_loop(_loop)
+
+# ── only NOW may pyrogram (and therefore tgcrypto) load ──────────────────
+from pyrogram import Client
+from pyrogram.enums import ParseMode
+
+from . import state, log
 
 log.setup()
 logger = log.get(__name__)
