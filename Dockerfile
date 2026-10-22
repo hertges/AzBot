@@ -13,11 +13,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY requirements.txt .
+COPY requirements.txt requirements-optional.txt ./
 # No `|| echo` swallowing: if a dependency fails to install, the BUILD fails
 # loudly instead of crashing at runtime with ModuleNotFoundError.
+# requirements-optional.txt (tgcrypto) is installed best-effort: on python
+# 3.12 it has no wheel and needs a source build. If that build fails the
+# image still ships — crypto_guard.py self-tests tgcrypto at every startup
+# and falls back to pure-Python crypto.
 RUN pip install --no-cache-dir -r requirements.txt \
-    && python -c "import pyrogram, tgcrypto, yt_dlp, gallery_dl; print('deps OK')"
+    && (pip install --no-cache-dir -r requirements-optional.txt || echo "tgcrypto unavailable — pure-Python crypto") \
+    && python -c "import pyrogram, yt_dlp, gallery_dl; print('deps OK')" \
+    && (python -c "import tgcrypto; print('tgcrypto OK')" || echo "tgcrypto not installed — pure-Python crypto")
 
 COPY . .
 

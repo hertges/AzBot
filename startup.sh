@@ -28,6 +28,27 @@ export PATH="$BIN:$PATH"
 say() { echo "[azbot] $*"; }
 die() { echo "[azbot] FATAL: $*" >&2; exit 1; }
 
+GETPIP_URL="https://bootstrap.pypa.io/get-pip.py"
+
+# Download helper. curl first, wget second; if the image has NEITHER,
+# bootstrap with python's urllib (always present). Must be defined before
+# anything calls it.
+fetch() {  # $1 = url, $2 = output file
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --retry 3 --connect-timeout 20 -o "$2" "$1" 2>/dev/null && return 0
+    fi
+    if command -v wget >/dev/null 2>&1; then
+        wget -q -O "$2" "$1" 2>/dev/null && return 0
+    fi
+    "$PY" - "$1" "$2" <<'PYEOF' 2>/dev/null
+import shutil, sys, urllib.request
+url, dst = sys.argv[1], sys.argv[2]
+with urllib.request.urlopen(url, timeout=60) as r, open(dst, "wb") as f:
+    shutil.copyfileobj(r, f)
+PYEOF
+    [ -s "$2" ]
+}
+
 # ── 1. Python ───────────────────────────────────────────────────────────────
 PY=""
 for c in python3.11 python3.12 python3.10 python3.13 python3 python; do
@@ -54,6 +75,15 @@ else
 fi
 export PIP_ROOT_USER_ACTION=ignore
 PIPLOG="$HOME/.azbot-pip.log"
+
+# Some slim images ship python without ensurepip, so even "-m pip" is
+# missing. Bootstrap it once via get-pip.py.
+if ! $PIP --version >/dev/null 2>&1; then
+    say "pip missing — bootstrapping with get-pip.py"
+    if fetch "$GETPIP_URL" "$HOME/.get-pip.py" 2>/dev/null; then
+        "$PYBIN" "$HOME/.get-pip.py" --quiet >>"$PIPLOG" 2>&1 || true
+    fi
+fi
 
 pip_install() {  # $1 = requirements file
     $PIP install --no-cache-dir -r "$1" >"$PIPLOG" 2>&1 && return 0
@@ -87,24 +117,6 @@ fi
 # ── 3. binaries ─────────────────────────────────────────────────────────────
 CACHE="$HOME/.azbot-cache"
 mkdir -p "$CACHE"
-
-fetch() {  # $1 = url, $2 = output file
-    # curl first, wget second. If the image has NEITHER, bootstrap one:
-    # python's urllib is always there.
-    if command -v curl >/dev/null 2>&1; then
-        curl -fsSL --retry 3 --connect-timeout 20 -o "$2" "$1" 2>/dev/null && return 0
-    fi
-    if command -v wget >/dev/null 2>&1; then
-        wget -q -O "$2" "$1" 2>/dev/null && return 0
-    fi
-    "$PY" - "$1" "$2" <<'PYEOF' 2>/dev/null
-import shutil, sys, urllib.request
-url, dst = sys.argv[1], sys.argv[2]
-with urllib.request.urlopen(url, timeout=60) as r, open(dst, "wb") as f:
-    shutil.copyfileobj(r, f)
-PYEOF
-    [ -s "$2" ]
-}
 
 unpack() {  # $1 = archive, $2 = dest dir
     "$PY" - "$1" "$2" <<'PYEOF' 2>/dev/null
