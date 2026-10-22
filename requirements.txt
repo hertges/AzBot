@@ -5,15 +5,10 @@
 # >=2.0.106 resolves to exactly it today; the <3 cap only guards against a
 # future incompatible major rewrite silently breaking the bot.
 pyrogram>=2.0.106,<3
-
-# NOTE: tgcrypto is NOT listed here on purpose. tgcrypto 1.2.5 (the last
-# upstream release) only ships wheels up to cp311, and on a musl/Alpine
-# image a source build needs a toolchain the panel doesn't have — a hard
-# pin would abort the whole install and take the bot down with it.
-# The bot installs it as a best-effort extra (requirements-optional.txt)
-# and crypto_guard.py self-tests it at every startup, falling back to
-# pure-Python crypto automatically. Worst case = slower crypto, never
-# a crash.
+# Native crypto accelerator for pyrogram (1.2.5 is the last upstream
+# release). The bot self-tests it at every startup (crypto_guard.py) and
+# falls back to pure-Python crypto automatically if a build ever misbehaves.
+tgcrypto>=1.2.5,<2
 
 # ── Downloaders (deliberately UNPINNED — near-daily fixes upstream) ──────
 # NOT auto-updated at runtime (removed): `pip install -U yt-dlp` in the

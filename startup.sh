@@ -98,18 +98,13 @@ if [ -f requirements.txt ]; then
     if pip_install requirements.txt; then
         say "dependencies installed"
     else
-        say "install failed (see $PIPLOG) — retrying without the optional extras"
+        # One retry without the native crypto accelerator: tgcrypto 1.2.5 has
+        # no wheels for python >= 3.12 and needs a C compiler, which slim
+        # panel images often lack. Everything else still installs normally;
+        # crypto_guard.py falls back to pure-python crypto on its own.
+        say "install failed (see $PIPLOG) — retrying without tgcrypto"
         grep -vi '^tgcrypto' requirements.txt > "$HOME/.req-notgc.txt"
         pip_install "$HOME/.req-notgc.txt" || { tail -20 "$PIPLOG"; die "dependency install failed"; }
-    fi
-fi
-
-# Optional extras (tgcrypto): best-effort, never fatal.
-if [ -f requirements-optional.txt ]; then
-    if pip_install requirements-optional.txt; then
-        say "optional extras installed (tgcrypto native crypto)"
-    else
-        say "tgcrypto unavailable — pure-Python crypto (slower, fine)"
     fi
 fi
 [ -x "$PYBIN" ] || die "no usable python after install"

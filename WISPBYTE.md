@@ -9,8 +9,7 @@ The repo already contains everything needed:
 | file | what it is |
 |---|---|
 | `bot.py`, `bot_pkg/` | the bot itself |
-| `requirements.txt` | python deps (tgcrypto moved out — see below) |
-| `requirements-optional.txt` | tgcrypto, installed best-effort only |
+| `requirements.txt` | python deps, installed normally (tgcrypto included) |
 | `startup.sh` | the startup command: venv + deps + missing binaries + run |
 | `.env.example` | every environment variable the bot understands |
 
@@ -96,16 +95,20 @@ short form works too — `sh startup.sh` or `sh AzBot/startup.sh`.
 Save (Ctrl+S). The script:
 
 1. picks the newest Python it can find (3.11 first),
-2. creates `~/venv` and installs `requirements.txt` into it,
+2. creates `~/venv` and installs `requirements.txt` into it (all deps,
+   tgcrypto included — it just builds from source on python 3.12+),
 3. installs the binaries the panel image does not ship — `ffmpeg`,
    `ffprobe`, `aria2c`, `7z` (installed as `7z`) and GNU `wget` — all as
    **static** builds in `~/bin`, so no root and no `apk` are needed,
-4. installs `requirements-optional.txt` (tgcrypto) best-effort,
-5. refuses to start if `API_ID` / `API_HASH` / `BOT_TOKEN` are missing,
-6. runs `bot.py` and restarts it 15 s after it exits.
+4. refuses to start if `API_ID` / `API_HASH` / `BOT_TOKEN` are missing,
+5. runs `bot.py` and restarts it 15 s after it exits.
 
 Re-running it is safe: downloads are cached in `~/.azbot-cache` and the venv
 is reused.
+
+If the install of `tgcrypto` fails (no wheel for python 3.12+, and the
+image has no C compiler), the script retries once without it. The bot then
+runs on pure-Python crypto — slower MTProto uploads, but it works.
 
 ## 5. Start it and watch the log
 
@@ -117,7 +120,6 @@ A healthy start looks like this:
 [azbot] python: Python 3.11.17
 [azbot] creating venv at /home/container/venv
 [azbot] dependencies installed
-[azbot] optional extras installed (tgcrypto native crypto)
 [azbot] ffmpeg installed
 [azbot] aria2c installed
 [azbot] 7z installed

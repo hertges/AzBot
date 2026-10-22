@@ -1,8 +1,0 @@
-# Optional extras — installed best-effort by startup.sh; a failure here is
-# never fatal (crypto_guard.py falls back to pure-Python crypto).
-#
-# tgcrypto 1.2.5 is the last upstream release. Wheels exist only up to
-# cp311, so on python >= 3.12 this needs a source build (needs a C
-# toolchain). On a musl/Alpine panel image the build usually fails — that
-# is fine, the bot runs on pure-Python crypto.
-tgcrypto>=1.2.5,<2
