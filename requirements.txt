@@ -10,11 +10,16 @@ pyrogram>=2.0.106,<3
 # falls back to pure-Python crypto automatically if a build ever misbehaves.
 tgcrypto>=1.2.5,<2
 
-# ── Downloaders (deliberately UNPINNED — near-daily fixes upstream) ──────
+# ── Downloaders ──────────────────────────────────────────────────────────
 # NOT auto-updated at runtime (removed): `pip install -U yt-dlp` in the
 # image / a bot restart is the update path.
 yt-dlp
-gallery-dl
+# PINNED to a dev snapshot: 1.32.17 is broken for ALL Instagram GraphQL
+# queries (missing_required_variable_value -> KeyError: 'data' ->
+# NotFoundError), even with valid cookies — upstream issue #9829.
+# Fix commit c0e3747a44 ("dynamically collect relay parameters") is in
+# master; revert to plain `gallery-dl` once 1.33.0 is released.
+https://codeberg.org/mikf/gallery-dl/archive/c0e3747a44870d77b3aec6b340b036b8a3e0561e.zip
 
 # ── Support libs (stable public APIs; always current via pip) ────────────
 requests
