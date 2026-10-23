@@ -155,10 +155,21 @@ def check_ux_helpers():
     state.task_queue.get_nowait()
 
 
+def check_allowed_users():
+    """allowed_users() lists the admin when one is configured, and returns a
+    copy (mutating the result must not corrupt state)."""
+    from bot_pkg import state, config
+    users = state.allowed_users()
+    if config.ADMIN_ID:
+        assert str(config.ADMIN_ID) in users, users
+    users.add("999")
+    assert "999" not in state.allowed_users()
+
+
 if __name__ == "__main__":
     failures = 0
     for fn in (check_fmtsz, check_bom, check_zip_safety, check_fit_html,
-               check_limits, check_ux_helpers):
+               check_limits, check_ux_helpers, check_allowed_users):
         try:
             fn()
             print(f"ok   {fn.__name__}")

@@ -1,12 +1,13 @@
+import os
 import time, shutil, subprocess, threading
 from collections import deque
 
 from pyrogram import filters
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from . import config, state, build_info
+from . import config, state, build_info, drive
 from .core import app
-from .utils import fmt_time, guarded, safe_edit, esc, fit_html
+from .utils import fmt_time, fmtsz, guarded, safe_edit, esc, fit_html
 from .handlers_core import Authorized, AdminOnly
 from .handlers_shell import register_shell_handlers
 
@@ -52,6 +53,88 @@ def _crypto_ok():
     common cause of 'uploads are extremely slow' is this being False."""
     from . import crypto_guard
     return crypto_guard.enabled()
+
+
+@app.on_message(filters.command("ping") & Authorized)
+@guarded
+def cmd_ping(client, message):
+    """WZML-X's /ping: uptime + latency in one line. The single fastest
+    'is it alive and awake' check without reading /stats."""
+    t0 = time.time()
+    msg = message.reply_text("🏓 Pong…")
+    latency_ms = int((time.time() - t0) * 1000)
+    with state.jobs_lock:
+        n_jobs = len(state.ACTIVE_JOBS)
+    uptime = fmt_time(time.time() - state.BOOT_TS)
+    safe_edit(client, message.chat.id, msg.id,
+              f"🏓 <b>Pong</b> — <code>{latency_ms} ms</code>\n"
+              f"⏱ Uptime: <code>{uptime}</code>\n"
+              f"⚙️ Jobs: <code>{n_jobs}</code> running • "
+              f"<code>{state.task_queue.qsize()}</code> queued")
+
+
+@app.on_message(filters.command("count") & Authorized)
+@guarded
+def cmd_count(client, message):
+    """Storage tally per destination — what WZML-X's /count gives: how many
+    files and how many bytes the bot has actually delivered, from its own
+    logs rather than a guess."""
+    parts = (message.text or "").split(maxsplit=1)
+    target = parts[1].strip().lower() if len(parts) > 1 else ""
+    task_dir = config.DOWNLOAD_DIR
+    files = 0
+    total = 0
+    try:
+        for root, _dirs, names in os.walk(task_dir):
+            for n in names:
+                try:
+                    total += os.path.getsize(os.path.join(root, n))
+                    files += 1
+                except OSError:
+                    continue
+    except OSError as e:
+        return message.reply_text(f"❌ Can't read the download dir: <code>{esc(e)}</code>")
+    if target == "drive":
+        if not config.DRIVE_ACCOUNTS:
+            return message.reply_text("☁️ No Drive account configured. See <code>/settings</code>.")
+        try:
+            items = drive.list_files(page_size=1000)
+        except Exception as e:
+            return message.reply_text(f"❌ Drive listing failed: <code>{esc(str(e)[:200])}</code>")
+        if items is None:
+            return message.reply_text("❌ Drive not reachable — check <code>/settings</code> for the account state.")
+        dbytes = sum(int(f.get("size") or 0) for f in items)
+        return message.reply_text(
+            f"☁️ <b>Drive</b> ({len(config.DRIVE_ACCOUNTS)} account(s))\n"
+            f"📄 Files at root: <code>{len(items)}</code>\n"
+            f"💾 Size: <code>{fmtsz(dbytes)}</code>\n"
+            f"<i>Root level only — /drive browses folders.</i>")
+    free = state.disk_free_mb()
+    return message.reply_text(
+        f"📊 <b>Count</b>\n\n"
+        f"🗂 Temp files on disk: <code>{files}</code> • <code>{fmtsz(total)}</code>\n"
+        f"💾 Free disk: <code>{free} MB</code>\n"
+        f"⚙️ Active jobs: <code>{len(state.ACTIVE_JOBS)}</code> • "
+        f"queued: <code>{state.task_queue.qsize()}</code>\n\n"
+        f"☁️ <code>/count drive</code> — Drive root tally\n"
+        f"🧹 <code>/clean</code> — purge temp files")
+
+
+@app.on_message(filters.command(["users", "allowed"]) & AdminOnly)
+@guarded
+def cmd_users(client, message):
+    """Who can use the bot. /allow and /ban changed the set but nothing
+    ever displayed it — you had to remember or read users.json on the box."""
+    users = state.allowed_users()
+    lines = [f"👥 <b>Authorized users</b> ({len(users)})", ""]
+    if not users:
+        lines.append("  <i>open to everyone</i> — no ADMIN_ID and no allow-list")
+    for uid in sorted(users, key=lambda u: (u != str(config.ADMIN_ID), u)):
+        lines.append(f"  <code>{esc(uid)}</code>" +
+                     (" — <b>admin</b>" if uid == str(config.ADMIN_ID) else ""))
+    lines += ["", "➕ <code>/allow &lt;id&gt;</code> — add",
+              "➖ <code>/ban &lt;id&gt;</code> — remove"]
+    message.reply_text("\n".join(lines))
 
 
 @app.on_message(filters.command(["status", "jobs"]) & Authorized)

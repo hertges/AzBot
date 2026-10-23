@@ -158,7 +158,10 @@ HELP = {
                 "Needed for private Instagram accounts, stories/highlights, age-gated videos."),
     "admin": ("🔧 <b>Admin</b>\n\n"
               "<code>/status</code> — running jobs, one 🛑 button each\n"
-              "<code>/stats</code> — disk, RAM, active jobs\n<code>/clean</code> — purge stale temp files\n"
+              "<code>/stats</code> — disk, RAM, active jobs\n<code>/ping</code> — latency + uptime\n"
+              "<code>/count</code> — temp-file tally (<code>/count drive</code> for Drive root)\n"
+              "<code>/users</code> — who's authorized\n"
+              "<code>/clean</code> — purge stale temp files\n"
               "<code>/cancel &lt;id&gt;</code> / 🛑 button — stop a job\n<code>/cancelall</code> — stop everything\n"
               "<code>/log [lines]</code> — tail the bot log without SSH\n"
               "<code>/sh</code> — live persistent shell terminal (arrow keys, history, Ctrl+C button; <code>/shexit</code> quits)\n"

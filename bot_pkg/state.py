@@ -28,6 +28,9 @@ def _save_json(path, data):
 _settings = _load_json(config.SETTINGS_FILE, {})
 _allowed_users = set(_load_json(config.USERS_FILE, [config.ADMIN_ID] if config.ADMIN_ID else []))
 _lock = threading.Lock()
+# Process start, for /ping. Module import == bot boot (state is imported
+# before the client runs), so this is the uptime baseline.
+BOOT_TS = time.time()
 
 def save_settings():
     with _lock:
@@ -57,6 +60,16 @@ def is_authorized(user_id):
         return True
     uid = str(user_id)
     return uid == config.ADMIN_ID or uid in _allowed_users
+
+def allowed_users():
+    """Everyone who can use the bot — for /users (the set is the source of
+    truth; config.ADMIN_ID is implicit but listed too so the view is complete)."""
+    with _lock:
+        users = set(_allowed_users)
+    if config.ADMIN_ID:
+        users.add(str(config.ADMIN_ID))
+    return users
+
 
 def allow_user(user_id):
     _allowed_users.add(str(user_id)); save_users()
