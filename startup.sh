@@ -205,6 +205,13 @@ install_wget
 command -v zip >/dev/null 2>&1 && say "zip present" || say "zip missing — the zip-index repair path stays disabled"
 
 # ── 4. credentials ──────────────────────────────────────────────────────────
+# The panel's variable list doesn't always reach this shell — but bot.py
+# loads .env itself via python-dotenv, so mirror that here: source a .env
+# kept next to bot.py before checking.
+if [ -f .env ]; then
+    set -a; . ./.env 2>/dev/null || true; set +a
+    say "loaded .env"
+fi
 missing=""
 for v in API_ID API_HASH BOT_TOKEN; do
     eval "val=\${$v:-}"
