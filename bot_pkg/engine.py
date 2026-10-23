@@ -167,6 +167,12 @@ def probe_qualities(url, chat_id, allow_retry_without_cookies=True):
             elif f.get("acodec", "none") != "none":
                 auds.append(f)
 
+        # YouTube (and most DASH sites) serve video and audio as SEPARATE
+        # streams; yt-dlp merges them on download. A video-only row is the
+        # NORMAL case, not a silent-movie warning — WZML-X shows no such
+        # tag, and the 🔇 markers made users pick combined-only formats
+        # (often 360p) thinking the 1080p would come out muted.
+        # needs_audio still drives the automatic `+ba/b` merge on pick.
         options = [{"label": "⚡ BEST (V+A)", "selector": "bv*+ba/b",
                     "needs_audio": False}]
 
@@ -181,9 +187,8 @@ def probe_qualities(url, chat_id, allow_retry_without_cookies=True):
             fps_s = f"{fps}@ " if fps and fps not in (25, 30) else ""
             sz = _est_bytes(f, duration)
             tag = codec_tag(f.get("vcodec"))
-            note = "" if f.get("acodec") != "none" else " 🔇"
             label = (f"{f['height']}p{fps_s} {f.get('ext', '?')} "
-                     f"{_fmt_size(sz)} {tag}{note}").strip()
+                     f"{_fmt_size(sz)} {tag}").strip()
             options.append({
                 "label": label[:60],
                 "selector": f["format_id"],

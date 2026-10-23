@@ -12,7 +12,11 @@ from .handlers_core import Authorized, cancel_kb
 logger = log.get(__name__)
 
 POST_RE = re.compile(r"instagram\.com/(p|reel|tv)/")
-PROFILE_RE = re.compile(r"instagram\.com/([A-Za-z0-9._]+)/?(?:\?|$)")
+# Single story/highlight item shares (…/stories/<user>/<id>?utm_source=…,
+# …/stories/highlights/<id>/…) — handed straight to gallery-dl like posts;
+# note /stories/highlights/<id> has no username segment.
+STORY_RE = re.compile(r"instagram\.com/stories/")
+PROFILE_RE = re.compile(r"instagram\.com/([A-Za-z0-9._]+)/?(?:[?#].*)?$")
 
 ARCHIVE_URLS = {
     # Explicit sub-extractor URLs — verified against gallery-dl 1.32 source:
@@ -68,6 +72,15 @@ def dispatch_instagram(client, message, url, dest):
         # gallery-dl (not yt-dlp) here on purpose: yt-dlp only pulls video
         # and errors out with "No video formats found!" on photo-only or
         # carousel posts. gallery-dl handles photos/carousels/videos alike.
+        from .handlers_subproc import queue_subprocess_job
+        return queue_subprocess_job(client, message, "gallery", url, dest)
+
+    if STORY_RE.search(url):
+        # Single story/highlight item share (…/stories/<user>/<id>, or
+        # …/stories/highlights/<id>) — gallery-dl's instagram:story and
+        # instagram:highlight extractors both take these directly. Items
+        # MAY 403 without a cookie profile; fail_hint covers that on the
+        # job side, same as the Stories archive button.
         from .handlers_subproc import queue_subprocess_job
         return queue_subprocess_job(client, message, "gallery", url, dest)
 

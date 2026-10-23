@@ -793,8 +793,8 @@ def _do_picker(client, message, status_id, url, dest, zip_output, rename, folder
 def cb_format_pick(client, cq):
     """A concrete format was chosen. Video-only formats get BEST audio
     merged automatically (the old second "🎚 Merge which audio?" step is
-    gone — nobody ever wants a silent video; the rare no-audio case is
-    covered by the 🔇-labeled buttons which already skip merging)."""
+    gone — nobody ever wants a silent video; DASH video rows are the
+    normal case and `needs_audio` is what makes them merge)."""
     _, token, idx = cq.data.split(":", 2)
     session = state.get_quality_session(token)
     if not session:
