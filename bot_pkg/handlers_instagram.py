@@ -5,7 +5,7 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from . import config, state, drive, log
 from .core import app
-from .utils import new_task_id, throttled_edit, autoclean_if_enabled, guarded, safe_edit, esc, fmt_time, topic_root_id
+from .utils import new_task_id, throttled_edit, autoclean_if_enabled, guarded, safe_edit, esc, fmt_time, topic_root_id, fail_hint
 from .dispatcher import LiveDispatcher
 from .handlers_core import Authorized, cancel_kb
 
@@ -438,6 +438,8 @@ def run_ig_multi_archive_job(client, chat_id, msg_id, username, types, task_id, 
                     if state.is_cancelled(task_id):
                         break
                     full_log.append(line.rstrip())
+                    if len(full_log) > 800:
+                        del full_log[:400]   # only the tail is ever shown
                     # live view refresh driven by the DISPATCHER's seen-count
                     # (files landed on disk), not by stdout parsing
                     if len(disp.seen) != last_count[0]:
@@ -445,7 +447,11 @@ def run_ig_multi_archive_job(client, chat_id, msg_id, username, types, task_id, 
                         _edit_live(archive_type)
             except (AttributeError, ValueError):
                 pass  # stdout closed by /cancel teardown — expected
-            proc.wait()
+            try:
+                proc.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=30)
 
             if stalled.is_set():
                 disp.stop()
@@ -560,7 +566,7 @@ def run_ig_multi_archive_job(client, chat_id, msg_id, username, types, task_id, 
 
     except Exception as e:
         logger.exception(f"[{task_id}] /ig job failed")
-        throttled_edit(client, chat_id, msg_id, f"❌ <code>{esc(str(e)[:300])}</code>", force=True)
+        throttled_edit(client, chat_id, msg_id, f"❌ <code>{esc(str(e)[:300])}</code>" + fail_hint(e), force=True)
     finally:
         if disp is not None:
             # no-op when finalize() already stopped it; on an error exit the

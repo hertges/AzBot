@@ -8,7 +8,7 @@ from . import config, state, engine, uploader, drive, log
 from .core import app
 from .utils import (new_task_id, throttled_edit, fmtsz, fix_unknown_ext, cancel_kb, bar,
                     smooth_speed, autoclean_if_enabled, guarded, safe_edit, esc, fmt_time,
-                    file_anchor)
+                    file_anchor, fail_hint, queue_note, eta_left)
 from .dispatcher import LiveDispatcher
 
 logger = log.get(__name__)
@@ -157,8 +157,13 @@ HELP = {
                 "Reply to a Netscape-format <code>cookies.txt</code> with <code>/cookie &lt;name&gt;</code> to add one.\n\n"
                 "Needed for private Instagram accounts, stories/highlights, age-gated videos."),
     "admin": ("🔧 <b>Admin</b>\n\n"
-              "<code>/stats</code> — disk, RAM, active jobs\n<code>/clean</code> — purge stale temp files\n"
+              "<code>/status</code> — running jobs, one 🛑 button each\n"
+              "<code>/stats</code> — disk, RAM, active jobs\n<code>/ping</code> — latency + uptime\n"
+              "<code>/count</code> — temp-file tally (<code>/count drive</code> for Drive root)\n"
+              "<code>/users</code> — who's authorized\n"
+              "<code>/clean</code> — purge stale temp files\n"
               "<code>/cancel &lt;id&gt;</code> / 🛑 button — stop a job\n<code>/cancelall</code> — stop everything\n"
+              "<code>/log [lines]</code> — tail the bot log without SSH\n"
               "<code>/sh</code> — live persistent shell terminal (arrow keys, history, Ctrl+C button; <code>/shexit</code> quits)\n"
               "<code>/allow &lt;id&gt;</code> / <code>/ban &lt;id&gt;</code> — access control"),
 }
@@ -621,7 +626,7 @@ def cmd_mirror_leech(client, message):
         dupe_note = (f" — skipped {len(skipped_dupes)} duplicate(s) already downloading"
                      if skipped_dupes else "")
         status = message.reply_text(
-            f"🔎 Batch of {len(links)} queued{tag}{dupe_note} — <code>{esc(task_id)}</code>",
+            f"🔎 Batch of {len(links)} queued{tag}{dupe_note}{queue_note()} — <code>{esc(task_id)}</code>",
             reply_markup=cancel_kb(task_id))
         task_dir = os.path.join(config.DOWNLOAD_DIR, task_id)
         state.register_job(task_id, message.chat.id, status.id, "batch", task_dir)
@@ -842,7 +847,7 @@ def _launch_status_and_job(client, chat_id, reply_msg_id_unused, session,
     # topic instead of the one the user is actually chatting in.
     status = client.send_message(
         chat_id,
-        f"🔎 Queued{tag} — <code>{esc(task_id)}</code>",
+        f"🔎 Queued{tag}{queue_note()} — <code>{esc(task_id)}</code>",
         reply_to_message_id=session["reply_to"],
         reply_markup=cancel_kb(task_id))
     task_dir = os.path.join(config.DOWNLOAD_DIR, task_id)
@@ -867,7 +872,7 @@ def cb_quality_pick(client, cq):
     cq.answer()
     task_id = new_task_id()
     tag = f" 📦→{config.DEST_LABEL[session['dest']]}" if session["zip_output"] else f" →{config.DEST_LABEL[session['dest']]}"
-    status = cq.message.reply_text(f"🔎 Queued{tag} — <code>{esc(task_id)}</code>", reply_markup=cancel_kb(task_id))
+    status = cq.message.reply_text(f"🔎 Queued{tag}{queue_note()} — <code>{esc(task_id)}</code>", reply_markup=cancel_kb(task_id))
     task_dir = os.path.join(config.DOWNLOAD_DIR, task_id)
     state.register_job(task_id, cq.message.chat.id, status.id, "yt-dlp", task_dir)
     state.task_queue.put((run_leech_job,
@@ -915,7 +920,7 @@ def queue_telegram_media_job(client, message, media_msg, dest, zip_output=False,
         return message.reply_text("❌ Disk full, try again later.")
     task_id = new_task_id()
     tag = f"📦→{config.DEST_LABEL[dest]}" if zip_output else f"→{config.DEST_LABEL[dest]}"
-    status = message.reply_text(f"🔎 Queued {tag} — <code>{esc(task_id)}</code>", reply_markup=cancel_kb(task_id))
+    status = message.reply_text(f"🔎 Queued {tag}{queue_note()} — <code>{esc(task_id)}</code>", reply_markup=cancel_kb(task_id))
     task_dir = os.path.join(config.DOWNLOAD_DIR, task_id)
     state.register_job(task_id, message.chat.id, status.id, "tg-media", task_dir)
     state.task_queue.put((run_telegram_media_job,
@@ -995,7 +1000,7 @@ def run_telegram_media_job(client, chat_id, msg_id, media_msg, task_id, reply_to
         throttled_edit(client, chat_id, msg_id, "🛑 Cancelled.", force=True)
     except Exception as e:
         logger.exception(f"[{task_id}] telegram-media job failed")
-        throttled_edit(client, chat_id, msg_id, f"❌ Failed: <code>{esc(str(e)[:300])}</code>", force=True)
+        throttled_edit(client, chat_id, msg_id, f"❌ Failed: <code>{esc(str(e)[:300])}</code>" + fail_hint(e), force=True)
     finally:
         state.drop_job(task_id)
         state.drop_url_by_task(task_id)
@@ -1072,7 +1077,7 @@ def queue_gdrive_job(client, message, file_id, dest, zip_output=False, rename=No
         return message.reply_text("❌ Disk full, try again later.")
     task_id = new_task_id()
     tag = f" 📦→{config.DEST_LABEL[dest]}" if zip_output else f" →{config.DEST_LABEL[dest]}"
-    status = message.reply_text(f"🔎 Queued{tag} — <code>{esc(task_id)}</code>", reply_markup=cancel_kb(task_id))
+    status = message.reply_text(f"🔎 Queued{tag}{queue_note()} — <code>{esc(task_id)}</code>", reply_markup=cancel_kb(task_id))
     task_dir = os.path.join(config.DOWNLOAD_DIR, task_id)
     state.register_job(task_id, message.chat.id, status.id, "gdrive", task_dir)
     state.task_queue.put((run_gdrive_job,
@@ -1241,7 +1246,7 @@ def run_gdrive_job(client, chat_id, msg_id, file_id, task_id, reply_to, dest,
         throttled_edit(client, chat_id, msg_id, "🛑 Cancelled.", force=True)
     except Exception as e:
         logger.exception(f"[{task_id}] gdrive job failed")
-        throttled_edit(client, chat_id, msg_id, f"❌ Failed: <code>{esc(str(e)[:300])}</code>", force=True)
+        throttled_edit(client, chat_id, msg_id, f"❌ Failed: <code>{esc(str(e)[:300])}</code>" + fail_hint(e), force=True)
     finally:
         state.drop_job(task_id)
         shutil.rmtree(task_dir, ignore_errors=True)
@@ -1350,7 +1355,7 @@ def queue_leech_job(client, message, url, dest, zip_output=False, format_selecto
                     rename=None, folder=None):
     task_id = new_task_id()
     tag = f" 📦→{config.DEST_LABEL[dest]}" if zip_output else f" →{config.DEST_LABEL[dest]}"
-    status = message.reply_text(f"🔎 Queued{tag} — <code>{esc(task_id)}</code>", reply_markup=cancel_kb(task_id))
+    status = message.reply_text(f"🔎 Queued{tag}{queue_note()} — <code>{esc(task_id)}</code>", reply_markup=cancel_kb(task_id))
     task_dir = os.path.join(config.DOWNLOAD_DIR, task_id)
     state.register_job(task_id, message.chat.id, status.id, "yt-dlp", task_dir)
     state.register_url(url, task_id)
@@ -1398,7 +1403,7 @@ def run_batch_leech_job(client, chat_id, msg_id, urls, task_id, reply_to, dest,
                 batch["failed"] += 1
                 logger.warning(f"[{task_id}] batch link failed: {e}")
                 throttled_edit(client, chat_id, msg_id,
-                               f"{prefix_fn()}\n⚠️ One link failed: <code>{esc(str(e)[:120])}</code>",
+                               f"{prefix_fn()}\n⚠️ One link failed: <code>{esc(str(e)[:120])}</code>" + fail_hint(e),
                                force=True)
         summary = (f"✅ Batch complete — {total - batch['failed']}/{total} links → "
                    f"{config.DEST_LABEL[dest]}")
@@ -1714,10 +1719,10 @@ def run_leech_job(client, chat_id, msg_id, url, task_id, reply_to, dest, zip_out
     except engine.CancelledError:
         throttled_edit(client, chat_id, msg_id, "🛑 Cancelled.", force=True)
     except engine.DownloadError as e:
-        throttled_edit(client, chat_id, msg_id, f"❌ Couldn't fetch that link:\n<code>{esc(str(e)[:300])}</code>", force=True)
+        throttled_edit(client, chat_id, msg_id, f"❌ Couldn't fetch that link:\n<code>{esc(str(e)[:300])}</code>" + fail_hint(e), force=True)
     except Exception as e:
         logger.exception(f"[{task_id}] leech job failed")
-        throttled_edit(client, chat_id, msg_id, f"❌ Failed: <code>{esc(str(e)[:300])}</code>", force=True)
+        throttled_edit(client, chat_id, msg_id, f"❌ Failed: <code>{esc(str(e)[:300])}</code>" + fail_hint(e), force=True)
     finally:
         state.drop_job(task_id)
         # was missing (unlike every other job type) — ACTIVE_URLS kept every

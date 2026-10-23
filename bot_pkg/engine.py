@@ -588,7 +588,14 @@ def download_direct(url, chat_id, msg_id, task_id, client, dest_dir, label=None,
         # by /cancel — that's expected teardown, not an error.
         pass
 
-    proc.wait()
+    try:
+        proc.wait(timeout=60)
+    except subprocess.TimeoutExpired:
+        # stdout hit EOF but aria2c is still alive (a child holding the
+        # pipe, or a stuck filesystem write): don't park this worker
+        # thread on it forever.
+        proc.kill()
+        proc.wait(timeout=30)
     if state.is_cancelled(task_id):
         logger.info(f"[{task_id}] direct download cancelled")
         raise CancelledError("cancelled by user")

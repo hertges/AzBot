@@ -5,7 +5,7 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from . import config, drive, state, log, uploader
 from .core import app
-from .utils import fmtsz, guarded, safe_edit, esc, new_task_id, throttled_edit, cancel_kb, file_anchor
+from .utils import fmtsz, guarded, safe_edit, esc, new_task_id, throttled_edit, cancel_kb, file_anchor, fail_hint
 from .handlers_core import Authorized
 
 logger = log.get(__name__)
@@ -140,7 +140,7 @@ def cmd_drive(client, message):
     except Exception as e:
         logger.exception("drive render failed")
         throttled_edit(client, message.chat.id, notice.id,
-                       f"❌ Drive listing failed: <code>{esc(str(e)[:200])}</code>",
+                       f"❌ Drive listing failed: <code>{esc(str(e)[:200])}</code>" + fail_hint(e),
                        force=True)
 
 
@@ -365,7 +365,7 @@ def cb_drive_send(client, cq):
             throttled_edit(client, chat_id, status.id, "🛑 Cancelled.", force=True)
         except Exception as e:
             logger.exception("drvsnd job failed")
-            throttled_edit(client, chat_id, status.id, f"❌ <code>{esc(str(e)[:300])}</code>", force=True)
+            throttled_edit(client, chat_id, status.id, f"❌ <code>{esc(str(e)[:300])}</code>" + fail_hint(e), force=True)
         finally:
             state.drop_job(task_id)
             _sh.rmtree(os.path.join(config.DOWNLOAD_DIR, task_id), ignore_errors=True)
@@ -541,7 +541,7 @@ def cb_quick_send(client, cq):
             throttled_edit(client, chat_id, status.id, "🛑 Cancelled.", force=True)
         except Exception as e:
             logger.exception("qsnd job failed")
-            throttled_edit(client, chat_id, status.id, f"❌ <code>{esc(str(e)[:300])}</code>", force=True)
+            throttled_edit(client, chat_id, status.id, f"❌ <code>{esc(str(e)[:300])}</code>" + fail_hint(e), force=True)
         finally:
             state.drop_job(task_id)
             _sh.rmtree(task_dir, ignore_errors=True)

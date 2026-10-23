@@ -99,7 +99,10 @@ async def _pump_range(path, first_part, part_count, file_id, total_parts,
             if cancel_check():
                 raise UploadCancelled("cancelled by user")
             await sem.acquire()
-            chunk = fh.read(PART_SIZE)
+            # to_thread: a blocking read here stalls the whole event loop,
+            # and with it every other upload's ACKs — on cold cache over
+            # network storage that read can block for tens of ms per part.
+            chunk = await asyncio.to_thread(fh.read, PART_SIZE)
             if not chunk:
                 sem.release()
                 break
@@ -108,7 +111,7 @@ async def _pump_range(path, first_part, part_count, file_id, total_parts,
             # (possible only if the writer is still appending to the
             # file — never on a complete one).
             while len(chunk) < PART_SIZE:
-                more = fh.read(PART_SIZE - len(chunk))
+                more = await asyncio.to_thread(fh.read, PART_SIZE - len(chunk))
                 if not more:
                     break
                 chunk += more
@@ -156,8 +159,11 @@ async def upload_and_send(client, chat_id, path, *, kind="document",
                 progress_cb(sent_bytes["n"], size)
             except UploadCancelled:
                 raise
-            except Exception:
-                pass
+            except Exception as e:
+                # A broken progress callback (FloodWait on the status edit,
+                # deleted message) must not kill an in-flight upload, but
+                # silencing it entirely made "bar stopped moving" invisible.
+                log.logger.debug(f"upload progress_cb failed: {e!r}")
 
     cancel = cancel_check or (lambda: False)
 

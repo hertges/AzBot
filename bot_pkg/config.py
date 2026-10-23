@@ -1,8 +1,32 @@
 import re
-from dotenv import load_dotenv
-load_dotenv()
+from dotenv import find_dotenv, load_dotenv
+
+_ENV_PATH = find_dotenv() or find_dotenv(usecwd=True)
+load_dotenv(_ENV_PATH)
 
 import os
+
+# python-dotenv silently SKIPS a line with an unbalanced quote ("BOT_TOKEN=abc)
+# — the variable is simply absent, and the bot then exits "credentials
+# missing" for a file that looks fine. Say which line is broken.
+if _ENV_PATH:
+    with open(_ENV_PATH, encoding="utf-8-sig", errors="replace") as _fh:
+        for _n, _line in enumerate(_fh, 1):
+            _s = _line.strip()
+            if not _s or _s.startswith("#") or "=" not in _s:
+                continue
+            _val = _s.split("=", 1)[1].strip()
+            if _val and _val[0] in "\"'" and not (
+                    len(_val) > 1 and _val.endswith(_val[0])):
+                print(f"WARNING: {_ENV_PATH}:{_n} has an unclosed quote — "
+                      f"python-dotenv skipped this line, so "
+                      f"{_s.split('=', 1)[0].strip()} stays unset")
+
+# python-dotenv does NOT strip a UTF-8 BOM: a .env saved by Notepad/Excel
+# yields the key "\ufeffAPI_ID", os.environ.get("API_ID") misses it, and the
+# bot exits "credentials missing" for a file that looks correct.
+for _k in [k for k in os.environ if k.startswith("\ufeff")]:
+    os.environ[_k.lstrip("\ufeff")] = os.environ.pop(_k)
 
 # ── Telegram / Pyrogram credentials ─────────────────────────────────────
 # API_ID / API_HASH come from https://my.telegram.org (needed by Pyrogram

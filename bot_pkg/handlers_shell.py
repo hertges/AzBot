@@ -25,7 +25,7 @@ from pyrogram import filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from . import config, log
-from .utils import esc, throttled_edit
+from .utils import esc, throttled_edit, fit_html
 logger = log.get(__name__)
 
 SHELL_COMMAND_NAMES = ("sh", "shell")
@@ -215,8 +215,9 @@ class ShellSession:
         status = "🟢 live" if not self.exited else "⚫ ended"
         head = (f"🖥 <b>Live shell</b> ({status}) — type any command below • "
                 f"/shc = Ctrl+C • /shexit = quit\n")
+        body = fit_html(snap, 4096 - len(head) - len("<pre></pre>") - 8) or " "
         throttled_edit(self.client, self.chat_id, self.canvas,
-                       head + f"<pre>{esc(snap) or ' '}</pre>",
+                       head + f"<pre>{body}</pre>",
                        markup=None if self.exited else kb, force=force)
 
     # -- input ---------------------------------------------------------------

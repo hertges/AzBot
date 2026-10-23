@@ -15,10 +15,14 @@ KNOWN_COMMANDS = [
     "gallery", "g", "galleryl", "gm", "gallerym", "galleryz", "galleryzm",
     "clone", "clonem",
     "cookie", "settings", "drive", "drivesearch", "drivelist", "driveaccounts",
-    "stats", "clean", "cancel", "cancelall", "ca", "sh", "shell", "shc", "shexit", "shq",
+    "stats", "ping", "count", "users", "allowed", "clean", "cancel", "cancelall", "ca", "sh", "shell", "shc", "shexit", "shq",
     "allow", "ban",
+    # These four are admin-only but still need to be here: KNOWN_COMMANDS
+    # drives the "not authorized" reply, and without them an unlisted user
+    # typing /drivelogin fell through to the generic unknown-command path.
+    "drivelogin", "addaccount", "tokenup", "tokenpaste",
 ]
-ADMIN_COMMANDS = ["allow", "ban", "cancelall", "ca",
+ADMIN_COMMANDS = ["allow", "ban", "users", "allowed", "cancelall", "ca",
                   "shc", "shexit", "shq", "drivelogin", "addaccount",
                   "tokenup", "tokenpaste"]
 
