@@ -53,6 +53,24 @@ def _parse_aria2_error(lines):
     return None
 
 
+def _parse_gallery_error(lines):
+    # gallery-dl logs "[module][error] message" on stderr; the aria2-shaped
+    # parser can't see those, which left story failures with no error text.
+    for line in lines:
+        m = re.match(r"\[[\w-]+\]\[error\]\s*(.+)", line.strip())
+        if m:
+            return m.group(1)[:180]
+    return None
+
+
+def _parse_job_error(cmd, lines):
+    if cmd == "gallery":
+        g = _parse_gallery_error(lines)
+        if g:
+            return g
+    return _parse_aria2_error(lines)
+
+
 @app.on_message(filters.command(["gallery", "g", "galleryl", "gm", "gallerym",
                                   "galleryz", "galleryzm", "clone", "clonem"]) & Authorized)
 @guarded
@@ -284,7 +302,7 @@ def run_subprocess_job(client, chat_id, msg_id, cmd, url, task_id, reply_to,
                              for r, _, fs in os.walk(task_dir) for f in fs)
             if not has_files:
                 log_tail = "\n".join(full_log[-15:])
-                err = _parse_aria2_error(full_log)
+                err = _parse_job_error(cmd, full_log)
                 return throttled_edit(
                     client, chat_id, msg_id,
                     "❌ Nothing downloaded.\n" + (f"<code>{esc(err)}</code>\n" if err else "") +
@@ -345,7 +363,7 @@ def run_subprocess_job(client, chat_id, msg_id, cmd, url, task_id, reply_to,
             return throttled_edit(client, chat_id, msg_id, "🛑 Cancelled.", force=True)
 
         if sent == 0:
-            err = _parse_aria2_error(full_log)
+            err = _parse_job_error(cmd, full_log)
             log_tail = "\n".join(full_log[-15:])
             return throttled_edit(
                 client, chat_id, msg_id,
