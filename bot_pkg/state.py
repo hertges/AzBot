@@ -282,7 +282,18 @@ def list_cookie_profiles():
 def active_cookie_file(chat_id):
     name = get_prefs(chat_id).get("active_cookie", "global")
     p = cookie_path(name)
-    return p if os.path.exists(p) else None
+    if os.path.exists(p):
+        return p
+    # Fallback: this chat's pointer names a missing profile — try the
+    # literal "global" profile before giving up. Fixes the trap where the
+    # cookie was saved in DM (setting THAT chat's pointer) and a group
+    # chat with its own default ran with no cookies at all: stories then
+    # failed with gallery-dl's "NotFoundError: Requested user could not
+    # be found" instead of a login error.
+    g = cookie_path("global")
+    if name != "global" and os.path.exists(g):
+        return g
+    return None
 
 def rename_cookie_profile(chat_id, old_name, new_name):
     old_path, new_path = cookie_path(old_name), cookie_path(new_name)

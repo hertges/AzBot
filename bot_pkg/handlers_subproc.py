@@ -148,7 +148,8 @@ def run_subprocess_job(client, chat_id, msg_id, cmd, url, task_id, reply_to,
             return throttled_edit(client, chat_id, msg_id,
                                    f"❌ <code>{esc(args[0])}</code> isn't installed on this host.", force=True)
 
-        logger.info(f"[{task_id}] /{cmd} starting — {url} (dest={dest}, zip={zip_output})")
+        logger.info(f"[{task_id}] /{cmd} starting — {url} (dest={dest}, zip={zip_output}, "
+                    f"cookies={'yes:' + os.path.basename(cookie_file) if cookie_file else 'NONE'})")
         throttled_edit(client, chat_id, msg_id, f"⬇️ <code>/{esc(cmd)}</code>…\n<code>{esc(url[:60])}</code>",
                        markup=cancel_kb(task_id), force=True)
         proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
