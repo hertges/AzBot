@@ -1,4 +1,4 @@
-import math, time, threading, os, re, zipfile, uuid, hashlib, html as _html
+import time, threading, os, re, zipfile, uuid, hashlib, html as _html
 
 from pyrogram.errors import FloodWait, MessageNotModified
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -177,13 +177,19 @@ def guarded(fn):
                 anchor_msg_id = None
             if chat_id is not None:
                 try:
-                    await client.send_message(chat_id, f"❌ Something went wrong (`{fn.__name__}`):\n`{str(e)[:300]}`",
-                                               reply_to_message_id=anchor_msg_id)
+                    await client.send_message(
+                        chat_id,
+                        f"❌ Something went wrong (<code>{fn.__name__}</code>):\n"
+                        f"<code>{esc(str(e)[:300])}</code>",
+                        reply_to_message_id=anchor_msg_id)
                 except Exception:
                     # anchor_msg_id may itself be gone (deleted message) —
                     # don't let that swallow the crash report entirely.
                     try:
-                        await client.send_message(chat_id, f"❌ Something went wrong (`{fn.__name__}`):\n`{str(e)[:300]}`")
+                        await client.send_message(
+                            chat_id,
+                            f"❌ Something went wrong (<code>{fn.__name__}</code>):\n"
+                            f"<code>{esc(str(e)[:300])}</code>")
                     except Exception:
                         logger.warning(f"couldn't even report error for {fn.__name__} to chat {chat_id}")
             if hasattr(update, "answer"):  # CallbackQuery — clear the loading spinner
@@ -197,8 +203,11 @@ def fmtsz(b):
     if not b or b <= 0:
         return "0 B"
     n = ("B", "KB", "MB", "GB", "TB")
-    i = min(int(math.floor(math.log(b, 1024))), 4)
-    return f"{round(b / math.pow(1024, i), 2)} {n[i]}"
+    # Integer, not math.log: log(1024**2, 1024) can land on 1.9999999 and
+    # floor to KB, so exact powers rendered as "1024.0 KB".
+    i = min(max(int(b).bit_length() - 1, 0) // 10, 4)
+    v = b / 1024 ** i
+    return f"{int(v) if i == 0 else round(v, 2)} {n[i]}"
 
 def fmt_time(s):
     s = int(max(0, s)); m, s = divmod(s, 60); h, m = divmod(m, 60)
@@ -457,6 +466,20 @@ def sniff_ext_ffprobe(fpath):
         if name in _FFPROBE_EXT_MAP:
             return _FFPROBE_EXT_MAP[name]
     return None
+
+def fit_html(body, limit=3800):
+    """Escape `body` for HTML and trim it so the ESCAPED text fits `limit`.
+
+    Capping the raw text is not a message-length cap: esc() turns & into
+    &amp; (5x), so 3800 raw chars of shell output could exceed Telegram's
+    4096, and the edit/reply died with MESSAGE_TOO_LONG — which looked like
+    a frozen live view or a silently missing command result."""
+    out = esc(body)
+    if len(out) <= limit:
+        return out
+    keep = max(1, len(body) * limit // len(out))
+    return esc(body[-keep:])
+
 
 def fix_unknown_ext(fpath):
     """If fpath's extension looks like a placeholder yt-dlp/gallery-dl

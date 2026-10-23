@@ -438,6 +438,8 @@ def run_ig_multi_archive_job(client, chat_id, msg_id, username, types, task_id, 
                     if state.is_cancelled(task_id):
                         break
                     full_log.append(line.rstrip())
+                    if len(full_log) > 800:
+                        del full_log[:400]   # only the tail is ever shown
                     # live view refresh driven by the DISPATCHER's seen-count
                     # (files landed on disk), not by stdout parsing
                     if len(disp.seen) != last_count[0]:
@@ -445,7 +447,11 @@ def run_ig_multi_archive_job(client, chat_id, msg_id, username, types, task_id, 
                         _edit_live(archive_type)
             except (AttributeError, ValueError):
                 pass  # stdout closed by /cancel teardown — expected
-            proc.wait()
+            try:
+                proc.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=30)
 
             if stalled.is_set():
                 disp.stop()

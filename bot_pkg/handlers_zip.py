@@ -273,6 +273,12 @@ def _extract_multipart(anchor, dest_dir, report=None, cancelled=None):
     # in RAM and OOM-killed the container), mirror to a log file, and push a
     # throttled percentage edit to the status message.
     logp = os.path.join(run_dir, "__7z.log")
+    # Same guard the single-file path got: 7z writes whatever paths the
+    # archive stores, so a hostile/odd set could escape dest_dir. Validate
+    # the reassembled file itself (spanned sets are chained by 7z, which
+    # cannot be listed up front — but the joined .zip can).
+    if zipfile.is_zipfile(src):
+        _seven_preflight(src, dest_dir)
     # stdin=DEVNULL: an inherited terminal lets 7z's password prompt
     # block until the 4h timeout on protected archives — with DEVNULL it
     # fails fast and the tail below says why.
@@ -299,7 +305,13 @@ def _extract_multipart(anchor, dest_dir, report=None, cancelled=None):
                 if time.time() - t0 > 14400:
                     proc.terminate()
                     raise RuntimeError("7z extraction timed out")
-            proc.wait()
+            try:
+                proc.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                # pipe hit EOF but the process is still alive (a helper
+                # child holding it open): reap it instead of hanging here.
+                proc.kill()
+                proc.wait(timeout=30)
         if proc.returncode != 0:
             with open(logp, "rb") as fh:
                 fh.seek(max(0, os.path.getsize(logp) - 2048))
@@ -336,23 +348,91 @@ def _is_archive(name):
 def _safe_extract_zip(src, dest_dir, max_entries=100000):
     """ZipSlip-proof extraction: every member must resolve INSIDE dest_dir
     (absolute paths and ../ escape → hard error, not a silent overwrite
-    of code/credentials), plus entry-count and uncompressed-size caps so
-    a zip bomb can't fill the disk."""
+    of code/credentials), plus entry-count and byte caps so a zip bomb
+    can't fill the disk. Bytes are counted WHILE writing: the sizes in the
+    central directory are attacker-controlled, so pre-checking them is not
+    a cap."""
     base = os.path.realpath(dest_dir)
+    budget = max(0, state.disk_free_mb() - config.MIN_FREE_MB) * 1024 * 1024
+    written = skipped = 0
+    names = []
     with zipfile.ZipFile(src) as zf:
         infos = zf.infolist()
         if len(infos) > max_entries:
             raise RuntimeError(f"archive blocked: {len(infos)} entries (>{max_entries})")
-        total = sum(i.file_size for i in infos)
-        free_b = state.disk_free_mb() * 1024 * 1024
-        if total + config.MIN_FREE_MB * 1024 * 1024 > free_b:
-            raise RuntimeError(f"archive blocked: unpacks to {fmtsz(total)} with {fmtsz(free_b)} free")
         for info in infos:
             target = os.path.realpath(os.path.join(base, info.filename.replace("\\", "/").lstrip("/")))
             if target != base and not target.startswith(base + os.sep):
                 raise RuntimeError(f"archive blocked: unsafe entry {info.filename[:80]}")
-        zf.extractall(dest_dir)
-        return zf.namelist()
+            if info.is_dir():
+                os.makedirs(target, exist_ok=True)
+                continue
+            try:
+                os.makedirs(os.path.dirname(target) or base, exist_ok=True)
+                with zf.open(info) as sf, open(target, "wb") as df:
+                    while True:
+                        chunk = sf.read(1 << 20)
+                        if not chunk:
+                            break
+                        written += len(chunk)
+                        if written > budget:
+                            raise RuntimeError(f"archive blocked: unpacks past free space ({fmtsz(budget)})")
+                        df.write(chunk)
+            except OSError:
+                # One unusable name (Linux caps each path segment at 255
+                # bytes) must not abort the other 500 files in the archive.
+                skipped += 1
+                continue
+            names.append(info.filename)
+    if not names and skipped:
+        raise RuntimeError(f"extraction failed: all {skipped} entries had unusable names")
+    return names
+
+
+def _seven_preflight(src, dest_dir, max_entries=100000):
+    """One `7z l -slt` pass before extracting: entry cap, uncompressed-size
+    cap, and the ZipSlip check on every stored path. 7z writes whatever
+    paths the archive stores, so validating after extraction is too late —
+    the zipfile branch was guarded inside _safe_extract_zip, this one had
+    no guard at all."""
+    base = os.path.realpath(dest_dir)
+    p = subprocess.Popen(["7z", "l", "-slt", "-bso0", src],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    total = entries = 0
+    in_list = False
+    try:
+        for raw in p.stdout:
+            line = raw.decode("utf-8", "ignore").rstrip("\r\n")
+            # Everything above the "----------" divider is archive metadata
+            # and repeats the archive's own path as a Path = line.
+            if line.startswith("----------"):
+                in_list = True
+                continue
+            if not in_list:
+                continue
+            if line.startswith("Path = "):
+                entries += 1
+                if entries > max_entries:
+                    raise RuntimeError(f"archive blocked: >{max_entries} entries")
+                rel = line[7:].replace("\\", "/").lstrip("/")
+                tgt = os.path.realpath(os.path.join(base, rel))
+                if tgt != base and not tgt.startswith(base + os.sep):
+                    raise RuntimeError(f"archive blocked: unsafe entry {rel[:80]}")
+            elif line.startswith("Size = "):
+                try:
+                    total += int(line[7:])
+                except ValueError:
+                    pass
+        rc = p.wait()
+    finally:
+        if p.poll() is None:
+            p.kill()
+    if rc not in (0, 1):   # 1 = completed with warnings
+        raise RuntimeError(f"7z list failed: {p.stderr.read().decode(errors='ignore').strip()[:200]}")
+    free_b = state.disk_free_mb() * 1024 * 1024
+    if total + config.MIN_FREE_MB * 1024 * 1024 > free_b:
+        raise RuntimeError(f"archive blocked: unpacks to {fmtsz(total)} with {fmtsz(free_b)} free")
+
 
 def _extract(src, dest_dir):
     """zipfile for plain .zip (fast, no deps), 7z for everything else —
@@ -362,6 +442,7 @@ def _extract(src, dest_dir):
     if zipfile.is_zipfile(src):
         return _safe_extract_zip(src, dest_dir)
     if shutil.which("7z"):
+        _seven_preflight(src, dest_dir)
         # stdout (per-file listing) goes to DEVNULL — capture_output would
         # buffer the whole listing in RAM and OOM-kill on big archives;
         # errors are tiny and come on stderr.
@@ -401,8 +482,10 @@ def handle_multi_collect(client, message, _target=None):
                 InlineKeyboardButton("✅ Done — extract", callback_data="uzmdone"),
                 InlineKeyboardButton("✖ Cancel", callback_data="uzmcancel"),
             ]]))
-    except Exception:
-        pass  # count is still tracked even if the edit is throttled
+    except Exception as e:
+        # Throttled/garbled edit must not lose the part — the count is
+        # tracked in state. But silence hid Freeze bugs (status_id=0).
+        logger.debug(f"unzipmulti collect edit failed: {e!r}")
 
 
 @app.on_message(filters.document & Authorized)
@@ -424,8 +507,8 @@ def cb_unzip_multi_cancel(client, cq):
     cq.answer("Cancelled")
     try:
         app.edit_message_text(chat_id, sess["status_id"], "🛑 Session cancelled — nothing extracted.")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"unzipmulti cancel edit failed: {e!r}")
 
 
 @app.on_callback_query(filters.regex(r"^uzmdone$"))
@@ -471,9 +554,7 @@ def cmd_unzip(client, message):
     if message.command[0] == "unzipmulti":
         parts = message.text.split(maxsplit=1)
         folder = parts[1].strip().lstrip("#") if len(parts) > 1 else None
-        set_unzip_multi(message.chat.id, dest, folder, 0)
-        state.set_awaiting_input(message.chat.id, "unzipmulti_collect", None)
-        return message.reply_text(
+        sess_msg = message.reply_text(
             "📦 <b>Unzip-multi session started</b>\n\n"
             "Send or forward the archive PARTS one by one — each document is "
             "collected and counted. When all parts are in, tap ✅ <b>Done</b> "
@@ -484,6 +565,12 @@ def cmd_unzip(client, message):
                 InlineKeyboardButton("✅ Done — extract", callback_data="uzmdone"),
                 InlineKeyboardButton("✖ Cancel", callback_data="uzmcancel"),
             ]]))
+        # status_id must be the real message id: it used to be hard-coded 0,
+        # so every "collecting… N parts" edit targeted message 0 and died in
+        # a bare except — the user saw no counter at all.
+        set_unzip_multi(message.chat.id, dest, folder, sess_msg.id)
+        state.set_awaiting_input(message.chat.id, "unzipmulti_collect", None)
+        return sess_msg
 
     from .utils import parse_payload
     links, rename, folder = parse_payload(message.text.split(maxsplit=1)[1]
@@ -920,8 +1007,8 @@ def run_unzip_local_job(client, chat_id, msg_id, part_msgs, task_id, reply_to,
                                   if want_md5 else ""))
                 fp = None
             if not fp:
-                why = (f"MD5 mismatch — the bytes Telegram returned differ from what "
-                       f"the bot split" if want_md5 else
+                why = ("MD5 mismatch — the bytes Telegram returned differ from what "
+                       "the bot split" if want_md5 else
                        (f"{last_err}" if last_err else
                         f"{fmtsz(got)} of {fmtsz(part_size)}"))
                 return throttled_edit(client, chat_id, msg_id,

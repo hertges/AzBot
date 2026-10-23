@@ -186,6 +186,12 @@ def run_subprocess_job(client, chat_id, msg_id, cmd, url, task_id, reply_to,
                 if state.is_cancelled(task_id):
                     break
                 full_log.append(line.rstrip())
+                # A 3-hour torrent/aria2 run emits tens of thousands of
+                # progress lines; unbounded, this list is the job's whole
+                # output kept in RAM. Only the tail is ever shown, so drop
+                # the head in batches (del, not pop(0), to stay O(n/1)).
+                if len(full_log) > 800:
+                    del full_log[:400]
                 now = time.time()
                 if now - last_edit < 3:
                     continue
@@ -246,7 +252,14 @@ def run_subprocess_job(client, chat_id, msg_id, cmd, url, task_id, reply_to,
         except (AttributeError, ValueError):
             pass  # stdout closed by /cancel teardown — expected
 
-        proc.wait()
+        try:
+            proc.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            # stdout closed but the process is still alive (child holding
+            # the pipe, or a hung yt-dlp post-process): don't hang the
+            # worker thread forever waiting on it.
+            proc.kill()
+            proc.wait(timeout=30)
         logger.info(f"[{task_id}] /{cmd} process exited with code {proc.returncode}")
 
         if stalled.is_set():

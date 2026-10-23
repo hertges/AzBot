@@ -4,7 +4,7 @@ from pyrogram import filters
 
 from . import config, state, build_info
 from .core import app
-from .utils import fmt_time, guarded, safe_edit, esc
+from .utils import fmt_time, guarded, safe_edit, esc, fit_html
 from .handlers_core import Authorized, AdminOnly
 from .handlers_shell import register_shell_handlers
 
@@ -111,9 +111,7 @@ def _legacy_sh(client, message):
             result = subprocess.run(shell_cmd, shell=True, capture_output=True,
                                      text=True, timeout=SHELL_TIMEOUT_S)
             out = ((result.stdout or "") + (result.stderr or "")).strip() or "(no output)"
-            if len(out) > 3800:
-                out = out[-3800:]
-            safe_edit(client, message.chat.id, msg.id, f"<pre>{esc(out)}</pre>")
+            safe_edit(client, message.chat.id, msg.id, f"<pre>{fit_html(out)}</pre>")
         except subprocess.TimeoutExpired:
             safe_edit(client, message.chat.id, msg.id, "❌ Timed out.")
         except Exception as e:
