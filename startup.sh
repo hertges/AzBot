@@ -65,6 +65,10 @@ if [ ! -x "$VENV/bin/python" ]; then
 fi
 if [ -x "$VENV/bin/python" ]; then
     PYBIN="$VENV/bin/python"
+    # console-script CLIs the bot shells out to as subprocesses (gallery-dl,
+    # yt-dlp fallback paths) live in the venv's bin — put it on PATH or
+    # shutil.which("gallery-dl") inside the bot will miss them.
+    export PATH="$VENV/bin:$PATH"
     # "-m pip" survives venvs created without pip (--without-pip); a bare
     # $VENV/bin/pip does not always exist.
     PIP="$PYBIN -m pip"
