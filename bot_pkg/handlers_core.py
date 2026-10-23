@@ -197,7 +197,9 @@ def cmd_cookie(client, message):
         try:
             with open(path, encoding="utf-8", errors="replace") as fh:
                 for ln in fh:
-                    if not ln.strip() or ln.startswith("#"):
+                    if ln.startswith("#HttpOnly_"):
+                        ln = ln[len("#HttpOnly_"):]   # standard exemption: httpOnly cookies
+                    elif not ln.strip() or ln.startswith("#"):
                         continue
                     cols = ln.split("\t")
                     if len(cols) < 7:
