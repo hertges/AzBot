@@ -5,7 +5,7 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from . import config, state, drive, uploader, log
 from .core import app
-from .utils import bar, throttled_edit, new_task_id, zip_dir, fmtsz, autoclean_if_enabled, guarded, esc, split_dash_args, file_anchor
+from .utils import bar, throttled_edit, new_task_id, zip_dir, fmtsz, autoclean_if_enabled, guarded, esc, split_dash_args, file_anchor, fail_hint
 from .dispatcher import LiveDispatcher
 from .handlers_core import Authorized, cancel_kb
 
@@ -367,7 +367,7 @@ def run_subprocess_job(client, chat_id, msg_id, cmd, url, task_id, reply_to,
 
     except Exception as e:
         logger.exception(f"[{task_id}] /{cmd} job failed")
-        throttled_edit(client, chat_id, msg_id, f"❌ <code>{esc(str(e)[:300])}</code>", force=True)
+        throttled_edit(client, chat_id, msg_id, f"❌ <code>{esc(str(e)[:300])}</code>" + fail_hint(e), force=True)
     finally:
         if disp is not None:
             # stop() is a no-op when finalize() already stopped it — but on

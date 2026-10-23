@@ -18,7 +18,7 @@ from . import config, state, log, uploader, drive
 from .state import CancelledError, set_unzip_multi, get_unzip_multi, \
     add_unzip_multi_part, pop_unzip_multi
 from .core import app
-from .utils import (new_task_id, throttled_edit, fmtsz, guarded, esc,
+from .utils import (new_task_id, throttled_edit, fmtsz, guarded, esc, fail_hint,
                     autoclean_if_enabled, zip_dir, parse_payload, progress_line,
                     smooth_speed, file_anchor, file_md5, zip_tail_ok)
 from .handlers_core import Authorized, cancel_kb, _gdrive_file_id
@@ -824,7 +824,7 @@ def _finish_unzip(client, chat_id, msg_id, task_id, src_path, task_dir, reply_to
         raise   # EOCD/source diagnosis is refined by multipart callers
     except Exception as e:
         logger.exception("unzip job failed")
-        throttled_edit(client, chat_id, msg_id, f"❌ <code>{esc(str(e)[:300])}</code>", force=True)
+        throttled_edit(client, chat_id, msg_id, f"❌ <code>{esc(str(e)[:300])}</code>" + fail_hint(e), force=True)
 
 
 def run_unzip_local_job(client, chat_id, msg_id, part_msgs, task_id, reply_to,
@@ -1097,10 +1097,10 @@ def run_unzip_urls_job(client, chat_id, msg_id, urls, task_id, reply_to,
     except engine.CancelledError:
         throttled_edit(client, chat_id, msg_id, "🛑 Cancelled.", force=True)
     except engine.DownloadError as e:
-        throttled_edit(client, chat_id, msg_id, f"❌ Couldn't download:\n<code>{esc(str(e)[:250])}</code>", force=True)
+        throttled_edit(client, chat_id, msg_id, f"❌ Couldn't download:\n<code>{esc(str(e)[:250])}</code>" + fail_hint(e), force=True)
     except Exception as e:
         logger.exception("unzip-urls job failed")
-        throttled_edit(client, chat_id, msg_id, f"❌ <code>{esc(str(e)[:300])}</code>", force=True)
+        throttled_edit(client, chat_id, msg_id, f"❌ <code>{esc(str(e)[:300])}</code>" + fail_hint(e), force=True)
     finally:
         state.drop_job(task_id)
         shutil.rmtree(task_dir, ignore_errors=True)
@@ -1157,7 +1157,7 @@ def run_unzip_drive_job(client, chat_id, msg_id, drive_folder_id, task_id, reply
                       dest=dest, folder=folder, force_7z=True, file_anchor=file_anchor)
     except Exception as e:
         logger.exception("unzip-drive job failed")
-        throttled_edit(client, chat_id, msg_id, f"❌ <code>{esc(str(e)[:300])}</code>", force=True)
+        throttled_edit(client, chat_id, msg_id, f"❌ <code>{esc(str(e)[:300])}</code>" + fail_hint(e), force=True)
     finally:
         state.drop_job(task_id)
         shutil.rmtree(task_dir, ignore_errors=True)
@@ -1181,10 +1181,10 @@ def run_unzip_url_job(client, chat_id, msg_id, url, task_id, reply_to,
     except engine.CancelledError:
         throttled_edit(client, chat_id, msg_id, "🛑 Cancelled.", force=True)
     except engine.DownloadError as e:
-        throttled_edit(client, chat_id, msg_id, f"❌ Couldn't download:\n<code>{esc(str(e)[:250])}</code>", force=True)
+        throttled_edit(client, chat_id, msg_id, f"❌ Couldn't download:\n<code>{esc(str(e)[:250])}</code>" + fail_hint(e), force=True)
     except Exception as e:
         logger.exception("unzip-url job failed")
-        throttled_edit(client, chat_id, msg_id, f"❌ <code>{esc(str(e)[:300])}</code>", force=True)
+        throttled_edit(client, chat_id, msg_id, f"❌ <code>{esc(str(e)[:300])}</code>" + fail_hint(e), force=True)
     finally:
         state.drop_job(task_id)
         shutil.rmtree(task_dir, ignore_errors=True)
@@ -1313,7 +1313,7 @@ def run_zip_job(client, chat_id, msg_id, sources, task_id, reply_to, dest, renam
         throttled_edit(client, chat_id, msg_id, "🛑 Cancelled.", force=True)
     except Exception as e:
         logger.exception("zip job failed")
-        throttled_edit(client, chat_id, msg_id, f"❌ <code>{esc(str(e)[:300])}</code>", force=True)
+        throttled_edit(client, chat_id, msg_id, f"❌ <code>{esc(str(e)[:300])}</code>" + fail_hint(e), force=True)
     finally:
         state.drop_job(task_id)
         shutil.rmtree(task_dir, ignore_errors=True)

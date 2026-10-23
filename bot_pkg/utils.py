@@ -252,6 +252,72 @@ def bar(done, total, L=14):
 
 # (the old bar(done,total) helper was removed — callers use pbar/progress_line directly)
 
+def eta_left(done, total, t0, now=None):
+    """Seconds remaining for a transfer started at t0, or None when it can't
+    be known yet (no total, nothing moved, or less than half a second of
+    history — early samples extrapolate to absurd ETAs like '9h left')."""
+    if not total or done <= 0 or not t0:
+        return None
+    elapsed = (now if now is not None else time.time()) - t0
+    if elapsed < 0.5:
+        return None
+    speed = done / elapsed
+    return max(0, int((total - done) / speed)) if speed > 0 else None
+
+
+def queue_note():
+    """' · N job(s) ahead' when the worker queue is backed up, else ''. Lets
+    the 'Queued' reply say WHERE the job is instead of leaving the user
+    guessing whether the bot saw the message at all."""
+    try:
+        from . import state
+        n = state.task_queue.qsize()
+    except Exception:
+        return ""
+    return f" · {n} job(s) ahead" if n else ""
+
+
+# ── Failure hints ────────────────────────────────────────────────────────
+# A bare exception string tells the user what broke, never what to do next.
+# Each of these maps a failure the download stack actually emits onto the one
+# action that resolves it — the same "what to try" line WZML-X puts under a
+# failed task. First match wins; unknown errors get no hint (silence beats
+# a wrong guess).
+_FAIL_HINTS = (
+    (("no space left", "disk full", "enospc"),
+     "Free disk space with <code>/clean</code>, then send the link again."),
+    (("private", "members-only", "join this channel", "login required",
+      "sign in", "cookies", "401", "403", "unauthorized"),
+     "The source needs a login — reply to a cookies.txt with "
+     "<code>/cookie &lt;name&gt;</code>, then retry."),
+    (("unsupported url", "no video formats", "unable to download webpage",
+      "unable to extract", "404", "not found", "does not exist",
+      "gone"),
+     "The link looks dead or unsupported — check it still opens in a browser."),
+    (("bad zip", "unsupported archive", "cannot open", "truncated",
+      "end-of-archive", "corrupt"),
+     "The archive is incomplete — re-download every part, then retry."),
+    (("timed out", "timeout", "connection", "temporary failure",
+      "network", "ssl", "reset by peer"),
+     "Network hiccup or a host blocking the server — retry once before "
+     "digging further."),
+    (("no such file", "filenotfound", "file not found"),
+     "The file vanished before upload — the source may have interrupted "
+     "mid-download; retry."),
+)
+
+
+def fail_hint(err):
+    """Returns '' or a '\\n💡 …' line naming the next step for this failure."""
+    low = str(err or "").lower()
+    if not low:
+        return ""
+    for needles, hint in _FAIL_HINTS:
+        if any(n in low for n in needles):
+            return f"\n💡 {hint}"
+    return ""
+
+
 def smooth_speed(samples):
     if len(samples) < 2:
         return "…"

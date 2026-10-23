@@ -1,6 +1,8 @@
 import time, shutil, subprocess, threading
+from collections import deque
 
 from pyrogram import filters
+from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from . import config, state, build_info
 from .core import app
@@ -50,6 +52,54 @@ def _crypto_ok():
     common cause of 'uploads are extremely slow' is this being False."""
     from . import crypto_guard
     return crypto_guard.enabled()
+
+
+@app.on_message(filters.command(["status", "jobs"]) & Authorized)
+@guarded
+def cmd_status(client, message):
+    """Live job list with a 🛑 button per job — /cancel alone needed the task
+    id, which users only ever saw inside the 'Queued' line they'd already
+    scrolled past. Non-admins see only their own chat's jobs."""
+    admin = bool(message.from_user) and str(message.from_user.id) == config.ADMIN_ID
+    with state.jobs_lock:
+        jobs = dict(state.ACTIVE_JOBS)
+    if not admin:
+        jobs = {t: j for t, j in jobs.items() if j.get("chat_id") == message.chat.id}
+    queued = state.task_queue.qsize()
+    if not jobs:
+        return message.reply_text(
+            f"ℹ️ No active jobs{' — ' + str(queued) + ' queued' if queued else ''}.")
+    now = time.time()
+    lines = [f"📋 <b>Active jobs</b> ({len(jobs)} running"
+             + (f", {queued} queued" if queued else "") + ")"]
+    rows = []
+    for tid, j in list(jobs.items())[:10]:      # 10 = keyboard row budget
+        elapsed = fmt_time(int(now - j.get("start", now)))
+        lines.append(f"  🔴 <code>{esc(tid)}</code> — {esc(j.get('kind', '?'))} • {elapsed}")
+        rows.append([InlineKeyboardButton(f"🛑 Stop {j.get('kind', '?')} · {tid}",
+                                          callback_data=f"cancel:{tid}")])
+    if len(jobs) > 10:
+        lines.append(f"  <i>…and {len(jobs) - 10} more (see /stats)</i>")
+    message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(rows))
+
+
+@app.on_message(filters.command("log") & AdminOnly)
+@guarded
+def cmd_log(client, message):
+    """Tail bot.log without SSH — the whole point of a headless deploy is
+    that nobody can go read the file, and /stats tells you a job failed
+    without saying why."""
+    parts = (message.text or "").split()
+    try:
+        n = max(10, min(500, int(parts[1]))) if len(parts) > 1 else 120
+    except ValueError:
+        n = 120
+    try:
+        with open(config.LOG_FILE, encoding="utf-8", errors="replace") as fh:
+            tail = "".join(deque(fh, maxlen=n)) or "(log is empty)"
+    except OSError as e:
+        return message.reply_text(f"❌ Can't read the log: <code>{esc(e)}</code>")
+    message.reply_text(f"<pre>{fit_html(tail, limit=3800)}</pre>")
 
 
 @app.on_message(filters.command("clean") & Authorized)

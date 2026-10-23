@@ -129,10 +129,36 @@ def check_limits():
     assert "written > budget" in open(hz.__file__, encoding="utf-8").read()
 
 
+def check_ux_helpers():
+    # eta_left: no absurd ETAs from one early sample, None when unknowable.
+    from bot_pkg.utils import eta_left, fail_hint, queue_note
+    assert eta_left(10, 100, 0, now=100) is None        # no t0
+    assert eta_left(10, 100, 99.9, now=100) is None     # <0.5s of history
+    assert eta_left(0, 100, 1, now=10) is None          # nothing moved
+    assert eta_left(10, None, 1, now=10) is None        # no total
+    assert eta_left(50, 100, 1, now=11) == 10           # 5/s -> 50 left = 10s
+    assert eta_left(100, 100, 1, now=11) == 0           # done
+    # fail_hint: real stack strings get the matching next step, unknowns stay quiet.
+    assert "Free disk space" in fail_hint("OSError: [Errno 28] No space left on device")
+    assert "cookies.txt" in fail_hint("ERROR: Private video. Sign in if you've been granted access")
+    assert "dead or unsupported" in fail_hint("Unsupported URL: https://x/y")
+    assert "Network hiccup" in fail_hint("Connection reset by peer")
+    assert fail_hint("ValueError: weird internal thing") == ""
+    assert fail_hint(None) == "" and fail_hint("") == ""
+    # queue_note: empty when the worker is idle, ' · N job(s) ahead' when not.
+    from bot_pkg import state
+    while not state.task_queue.empty():
+        state.task_queue.get_nowait()
+    assert queue_note() == ""
+    state.task_queue.put(None)
+    assert queue_note() == " · 1 job(s) ahead", queue_note()
+    state.task_queue.get_nowait()
+
+
 if __name__ == "__main__":
     failures = 0
     for fn in (check_fmtsz, check_bom, check_zip_safety, check_fit_html,
-               check_limits):
+               check_limits, check_ux_helpers):
         try:
             fn()
             print(f"ok   {fn.__name__}")

@@ -4,7 +4,8 @@ from pyrogram.errors import FloodWait
 from pyrogram.enums import ParseMode
 
 from . import config, state, log
-from .utils import fmtsz, fmt_time, smooth_speed, throttled_edit, iter_split_parts, cancel_kb, progress_line, file_md5, zip_tail_ok
+from .utils import (fmtsz, fmt_time, smooth_speed, throttled_edit, iter_split_parts,
+                    cancel_kb, progress_line, file_md5, zip_tail_ok, eta_left)
 
 logger = log.get(__name__)
 
@@ -31,6 +32,7 @@ def _is_animated_webp(fpath):
 def _progress_cb(client, chat_id, msg_id, label, task_id=None):
     samples = []
     last_edit = [0.0]
+    t0 = [0.0]
     # label may be a plain string OR a callable(current, total) -> text.
     # The dispatcher passes a callable that renders the UNIFIED view
     # (folder header + upload line + any concurrent download line) so
@@ -39,6 +41,8 @@ def _progress_cb(client, chat_id, msg_id, label, task_id=None):
         if task_id and state.is_cancelled(task_id):
             raise CancelledError("upload cancelled by user")
         now = time.time()
+        if not t0[0]:
+            t0[0] = now - 0.001
         if now - last_edit[0] < 1.5 and current != total:
             return
         last_edit[0] = now
@@ -48,9 +52,12 @@ def _progress_cb(client, chat_id, msg_id, label, task_id=None):
         if callable(label):
             text = label(current, total)
         else:
+            eta = eta_left(current, total, t0[0], now)
             text = (f"{label}\n"
                     f"{progress_line('☁️', current, total)}\n"
-                    f"⚡ {smooth_speed(samples)}")
+                    f"⚡ {smooth_speed(samples)}"
+                    + (f"  •  ETA {fmt_time(eta)}" if eta is not None else ""))
+
         markup = cancel_kb(task_id) if task_id else None
         throttled_edit(client, chat_id, msg_id, text, markup=markup, force=(current == total))
     return cb

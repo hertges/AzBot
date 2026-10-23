@@ -5,7 +5,7 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from . import config, state, drive, log
 from .core import app
-from .utils import new_task_id, throttled_edit, autoclean_if_enabled, guarded, safe_edit, esc, fmt_time, topic_root_id
+from .utils import new_task_id, throttled_edit, autoclean_if_enabled, guarded, safe_edit, esc, fmt_time, topic_root_id, fail_hint
 from .dispatcher import LiveDispatcher
 from .handlers_core import Authorized, cancel_kb
 
@@ -566,7 +566,7 @@ def run_ig_multi_archive_job(client, chat_id, msg_id, username, types, task_id, 
 
     except Exception as e:
         logger.exception(f"[{task_id}] /ig job failed")
-        throttled_edit(client, chat_id, msg_id, f"❌ <code>{esc(str(e)[:300])}</code>", force=True)
+        throttled_edit(client, chat_id, msg_id, f"❌ <code>{esc(str(e)[:300])}</code>" + fail_hint(e), force=True)
     finally:
         if disp is not None:
             # no-op when finalize() already stopped it; on an error exit the
