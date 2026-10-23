@@ -189,11 +189,45 @@ def cmd_cookie(client, message):
         name = parts[1].strip() if len(parts) > 1 else "global"
         path = state.cookie_path(name)
         client.download_media(doc_msg, file_name=path)
+        # Validate BEFORE accepting: reject JSON exports, HTML, or files
+        # missing instagram's required keys — otherwise Instagram jobs run
+        # logged-out and fail with a baffling KeyError far from the cause.
+        required = {"sessionid"}
+        missing, n_lines = [], 0
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                for ln in fh:
+                    if not ln.strip() or ln.startswith("#"):
+                        continue
+                    cols = ln.split("\t")
+                    if len(cols) < 7:
+                        missing.append("format (need 7 tab-separated columns)")
+                        break
+                    n_lines += 1
+                    dom = cols[0].lstrip(".").lower()
+                    key = cols[5].lower()
+                    if "instagram.com" in dom and key in required:
+                        required.discard(key)
+        except OSError as e:
+            return message.reply_text(f"❌ Cookie file unreadable: <code>{esc(str(e))}</code>")
+        if n_lines == 0:
+            missing.append("no cookie rows found")
+        elif missing or required:
+            missing += [f"missing key: {k}" for k in required]
+        if missing:
+            os.remove(path)
+            state.mirror_cookie(name)
+            return message.reply_text(
+                "❌ Rejected <code>" + esc(name) + "</code>: " + "; ".join(dict.fromkeys(missing)) +
+                ".\nNeed a Netscape <code>cookies.txt</code> for <b>.instagram.com</b> containing "
+                "<code>sessionid</code> (export with the \"Get cookies.txt LOCALLY\" browser extension, "
+                "not a JSON export).")
         state.set_pref(message.chat.id, "active_cookie", name)
         state.mirror_cookie(name)   # persist to Drive datastore
         logger.info(f"chat {message.chat.id} saved cookie profile '{name}'")
         return message.reply_text(
-            f"🍪 Saved cookie profile <code>{esc(name)}</code> and made it active.\n"
+            f"🍪 Saved cookie profile <code>{esc(name)}</code> and made it active "
+            f"({n_lines} cookies, instagram session ok).\n"
             f"☁️ Mirrored to Drive: <code>AzBotData/cookies/{esc(os.path.basename(path))}</code>")
     if len(parts) > 1:
         name = parts[1].strip()
