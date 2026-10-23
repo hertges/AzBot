@@ -1,4 +1,5 @@
-import os, time, re, subprocess, requests, mimetypes
+import os, time, re, shutil, subprocess, requests, mimetypes
+from urllib.parse import urlparse, unquote
 
 from yt_dlp import YoutubeDL
 
@@ -544,6 +545,17 @@ def download_direct(url, chat_id, msg_id, task_id, client, dest_dir, label=None,
         logger.info(f"[{task_id}] direct download (aria2c) — server name: {fname!r}")
     else:
         logger.info(f"[{task_id}] direct download starting (aria2c) — {url}")
+
+    aria2 = shutil.which("aria2c")
+    if not aria2:
+        # Static aria2c install didn't survive the image rebuild — fall back
+        # to a single-stream requests fetch with the same progress UI.
+        # ponytail: no multi-connection speed; add py3-pycurl chunked DL when
+        # the panel image benefits from it.
+        logger.warning(f"[{task_id}] aria2c not found — falling back to single-stream download")
+        return _download_single_stream(url, dest_dir, fname, chat_id, msg_id, task_id,
+                                       client, progress_prefix_fn, label)
+
     args = [
         "aria2c", "-x", "16", "-s", "16", "-k", "1M",
         "--summary-interval=1", "--content-disposition=true",
@@ -608,6 +620,67 @@ def download_direct(url, chat_id, msg_id, task_id, client, dest_dir, label=None,
     fpath = os.path.join(dest_dir, files[0])
     logger.info(f"[{task_id}] direct download done — {fpath} ({fmtsz(os.path.getsize(fpath))})")
     return fpath
+
+def _download_single_stream(url, dest_dir, fname, chat_id, msg_id, task_id,
+                            client, progress_prefix_fn, label=None):
+    """Single-stream fallback when aria2c is unavailable. Same progress
+    UI: ▓ bar + speed. Writes to <name>.part then renames, so a crashed
+    job leaves no file that looks complete."""
+    os.makedirs(dest_dir, exist_ok=True)
+    name = fname or unquote(os.path.basename(urlparse(url).path)) or "file.bin"
+    out_path = os.path.join(dest_dir, name)
+    part_path = out_path + ".part"
+
+    headers = {}
+    if os.path.exists(part_path):
+        headers["Range"] = f"bytes={os.path.getsize(part_path)}-"
+    try:
+        r = requests.get(url, headers=headers, stream=True, timeout=(15, 60))
+        r.raise_for_status()
+    except requests.RequestException as e:
+        raise DownloadError(f"download failed: {e}")
+
+    total = int(r.headers.get("content-length") or 0)
+    resume = r.status_code == 206 and os.path.exists(part_path)
+    mode = "ab" if resume else "wb"
+    if not resume and os.path.exists(part_path):
+        os.remove(part_path)
+    done = os.path.getsize(part_path) if resume else 0
+    if total and done >= total:
+        pass  # already complete
+    else:
+        start_t = time.time()
+        last_edit = 0.0
+        f = open(part_path, mode)
+        try:
+            for chunk in r.iter_content(chunk_size=1 << 20):
+                if state.is_cancelled(task_id):
+                    raise CancelledError("cancelled by user")
+                if not chunk:
+                    continue
+                f.write(chunk)
+                done += len(chunk)
+                now = time.time()
+                if now - last_edit < 1.5:
+                    continue
+                last_edit = now
+                dt = now - start_t
+                spd = f"{fmtsz(done / dt)}/s" if dt > 0 else "…"
+                head = (f"📄 <code>{esc(fname)}</code>\n" if fname else "")
+                lbl = (f"{label}\n" if label else "")
+                prefix = progress_prefix_fn() if progress_prefix_fn else ""
+                if prefix:
+                    prefix += "\n"
+                text = (f"{prefix}⬇️ <b>Downloading</b>\n{lbl}{head}"
+                        f"{progress_line('⬇️', done, total)}\n⚡ {spd}")
+                throttled_edit(client, chat_id, msg_id, text, markup=cancel_kb(task_id))
+        finally:
+            f.close()
+            r.close()
+    os.rename(part_path, out_path)
+    logger.info(f"[{task_id}] direct download done — {out_path} ({fmtsz(done)})")
+    return out_path
+
 
 def _ffprobe_meta(fpath):
     """Returns {duration, width, height} via ffprobe, or {} if unavailable/
