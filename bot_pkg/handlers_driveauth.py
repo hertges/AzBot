@@ -283,3 +283,29 @@ def cmd_drivelist(client, message):
     message.reply_text(
         "☁️ <b>Registered Drive accounts</b>\n\n"
         + ("\n".join(rows) if rows else "_none — use /drivelogin or .env_"))
+
+
+@app.on_message(filters.command("rclone") & AdminOnly)
+@guarded
+def cmd_rclone(client, message):
+    """Upload a standard rclone.conf file or list configured rclone remotes."""
+    from . import rclone_driver
+    doc_msg = message if message.document else (
+        message.reply_to_message if (message.reply_to_message and message.reply_to_message.document) else None
+    )
+    if doc_msg:
+        client.download_media(doc_msg, file_name=rclone_driver.RCLONE_CONF)
+        try:
+            datastore.push_datafile(rclone_driver.RCLONE_CONF, "rclone.conf")
+        except Exception:
+            pass
+        remotes = rclone_driver.list_remotes()
+        return message.reply_text(
+            f"✅ <b>rclone.conf saved!</b>\n"
+            f"Remotes found ({len(remotes)}): <code>{esc(', '.join(remotes) or 'none')}</code>\n\n"
+            f"Select any remote in <code>/settings</code> → ☁️ Cloud.")
+    remotes = rclone_driver.list_remotes()
+    message.reply_text(
+        "☁️ <b>Rclone Multi-Cloud</b> (Mega, OneDrive, Dropbox, S3, WebDAV…)\n\n"
+        f"Configured remotes: <code>{esc(', '.join(remotes) or 'none')}</code>\n\n"
+        "Reply to your <code>rclone.conf</code> file with <code>/rclone</code> to import it.")

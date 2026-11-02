@@ -413,7 +413,9 @@ def _split_upload_video(client, chat_id, fpath, msg_id, reply_to, task_id):
     if duration <= 0:
         # can't determine duration — fall back to byte split (lazily, one
         # part on disk at a time — see iter_split_parts)
-        size = os.path.getsize(fpath)
+    size = os.path.getsize(fpath)
+    fpath = state.apply_name_template(chat_id, fpath)
+    size = os.path.getsize(fpath)
         total = -(-size // config.TG_MAX_FILE_BYTES)
         out = []
         for i, p in enumerate(iter_split_parts(fpath, config.TG_MAX_FILE_BYTES), 1):

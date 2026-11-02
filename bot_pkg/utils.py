@@ -214,6 +214,23 @@ def pbar(pct, width=12):
     return "▓" * filled + "░" * (width - filled)
 
 
+def stage_banner(active_stage="dl"):
+    """Renders a visual 3-step pipeline header:
+    active_stage: 'dl' | 'proc' | 'up'"""
+    steps = [
+        ("dl", "⬇️ Download"),
+        ("proc", "⚙️ Process"),
+        ("up", "☁️ Upload"),
+    ]
+    out = []
+    for key, label in steps:
+        if key == active_stage:
+            out.append(f"<b>[{label}]</b>")
+        else:
+            out.append(f"<i>{label}</i>")
+    return " ➔ ".join(out)
+
+
 def progress_line(label, done, total, elapsed=None):
     """One-line HTML status:
     ⬇️ Downloading ▓▓▓░░░ 42% • 210 MB / 500 MB • 00:12 left
@@ -479,17 +496,24 @@ def fix_unknown_ext(fpath):
 
 def split_dash_args(text):
     """WZML-style raw passthrough: everything after a standalone '--' token
-    is a verbatim arg list for the underlying downloader binary
-    (gallery-dl, wget…). Example:
-        /gallery <url> -- --range 1-5 --verbose
-    → ('<url>', ['--range', '1-5', '--verbose'])
+    is parsed with shlex so quoted arguments stay intact:
+        /gallery <url> -- --range "1-5" -o 'extractor.headers={"Referer":"https://x.com"}'
+    → ('<url>', ['--range', '1-5', '-o', 'extractor.sleep=2'])
     Using a bare '--' separator (standard CLI convention) keeps raw flags
     unambiguous against rename (#folder) and | name grammar."""
-    parts = (text or "").split()
-    if "--" in parts:
-        i = parts.index("--")
-        return " ".join(parts[:i]), parts[i + 1:]
-    return text or "", []
+    import shlex
+    if not text:
+        return "", []
+    m = re.search(r"(?:^|\s)--(?:\s+|$)", text)
+    if not m:
+        return text, []
+    head = text[:m.start()].rstrip()
+    tail = text[m.end():].strip()
+    try:
+        extra = shlex.split(tail) if tail else []
+    except ValueError:
+        extra = tail.split()
+    return head, extra
 
 
 def zip_dir(src, out):

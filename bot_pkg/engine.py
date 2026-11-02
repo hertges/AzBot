@@ -86,6 +86,16 @@ def _ydl_base_opts(chat_id, outtmpl):
         opts["cookiefile"] = ck
     if config.YT_DLP_OPTIONS:
         opts.update(config.YT_DLP_OPTIONS)
+    # Soft-subtitle embedding (per-chat toggle via /settings → 💬 Subtitles).
+    # yt-dlp writes subtitles and FFmpegEmbedSubtitle muxes them into the
+    # merged .mp4 as a soft track — Telegram then shows the CC button.
+    if state.get_prefs(chat_id).get("embed_subs", False):
+        opts["writesubtitles"] = True
+        opts["writeautomaticsub"] = True
+        opts["subtitleslangs"] = ["en", "fa", "ar", "es", "fr", "de", "ru", "hi"]
+        opts["postprocessors"] = opts.get("postprocessors", []) + [
+            {"key": "FFmpegEmbedSubtitle", "already_have_subtitle": False}
+        ]
     return opts
 
 def probe(url, chat_id):
@@ -190,11 +200,13 @@ def probe_qualities(url, chat_id, allow_retry_without_cookies=True):
                 "vid_id": f["format_id"],
             })
 
-        for f in sorted(auds, key=lambda x: x.get("abr") or 0, reverse=True)[:4]:
+        for f in sorted(auds, key=lambda x: x.get("abr") or 0, reverse=True)[:6]:
             abr = int(f.get("abr") or 0)
             sz = _est_bytes(f, duration)
+            lang = f.get("language") or ""
+            lang_tag = f" [{lang}]" if lang else ""
             options.append({
-                "label": f"🎵 {abr}K {f.get('ext', '?')} {_fmt_size(sz)}".strip(),
+                "label": f"🎵 {abr}K {f.get('ext', '?')}{lang_tag} {_fmt_size(sz)}".strip(),
                 "selector": f["format_id"],
                 "needs_audio": False,
             })
@@ -205,9 +217,11 @@ def probe_qualities(url, chat_id, allow_retry_without_cookies=True):
     # Thin-table retry: only-low-res + an active cookie profile → try once
     # more without it before showing a starved menu. This is the classic
     # reason another bot offers 1080p where we offered 360p.
-    heights = {o["label"].split("p")[0] for o in options[1:] if "p" in o["label"] and "🎵" not in o["label"]}
+    heights = {int(o["label"].split("p", 1)[0]) for o in options[1:]
+               if "p" in o["label"] and "🎵" not in o["label"]
+               and o["label"].split("p", 1)[0].isdigit()}
     if (heights
-            and max(int(h) for h in heights) <= 480
+            and max(heights) <= 480
             and state.active_cookie_file(chat_id)):
         logger.info(f"thin format table ({sorted(heights)}) with active cookie — re-probing without cookies")
         opts = _ydl_base_opts(chat_id, "%(id)s.%(ext)s")
@@ -222,9 +236,10 @@ def probe_qualities(url, chat_id, allow_retry_without_cookies=True):
                             info2 = e
                             break
             options2 = build(info2)
-            h2 = [int(o["label"].split("p")[0]) for o in options2[1:]
-                  if "p" in o["label"] and "🎵" not in o["label"]]
-            if h2 and max(h2) > max(int(h) for h in heights):
+            h2 = [int(o["label"].split("p", 1)[0]) for o in options2[1:]
+                  if "p" in o["label"] and "🎵" not in o["label"]
+                  and o["label"].split("p", 1)[0].isdigit()]
+            if h2 and max(h2) > max(heights):
                 return info2.get("title", info.get("title", "video")), options2, is_playlist
         except Exception as e:
             logger.warning(f"cookie-less re-probe failed: {e}")

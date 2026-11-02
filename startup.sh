@@ -195,10 +195,27 @@ install_wget() {
     say "GNU wget installed"
 }
 
+install_rclone() {
+    command -v rclone >/dev/null 2>&1 && { say "rclone already present"; return 0; }
+    A=$(bin_arch); [ -n "$A" ] || return 0
+    F="rclone-current-linux-$A.zip"
+    say "downloading rclone (static)"
+    fetch "https://downloads.rclone.org/$F" "$CACHE/$F" || { say "rclone download failed"; return 0; }
+    "$PY" - "$CACHE/$F" "$CACHE/rclone" <<'PYEOF' 2>/dev/null
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as z:
+    z.extractall(sys.argv[2])
+PYEOF
+    find "$CACHE/rclone" -type f -name rclone -exec cp {} "$BIN/rclone" \; 2>/dev/null
+    chmod +x "$BIN/rclone" 2>/dev/null
+    command -v rclone >/dev/null 2>&1 && say "rclone installed" || say "rclone unavailable"
+}
+
 install_ffmpeg
 install_aria2
 install_7z
 install_wget
+install_rclone
 
 # `zip` is only needed for the rare "zip -FF" index-repair path; the bot
 # degrades gracefully without it (python's zipfile handles normal zips).

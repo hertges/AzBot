@@ -21,17 +21,13 @@ def _build_args(cmd, url, task_dir, cookie_file, extra_args=None):
                 "--summary-interval=1", "--max-connection-per-server=8",
                 "-d", task_dir, url]
     if cmd == "gallery":
-        args = ["gallery-dl", "--dest", task_dir]
+        from .handlers_instagram import GDL_TUNING_ARGS
+        args = ["gallery-dl", "--dest", task_dir] + list(GDL_TUNING_ARGS)
         if cookie_file:
             args += ["--cookies", cookie_file]
-        # per-URL download archive (same ledger mechanism the IG archiver
-        # uses): gallery-dl skips items it already fetched, so re-running
-        # the same gallery URL only pulls NEW content. The ledger lives in
-        # data/indexes/ (g_<md5-of-url>.txt) and mirrors to the Drive
-        # datastore after the job — survives redeploys like the IG ones.
-        args.append(url)
         if extra_args:
             args += list(extra_args)
+        args.append(url)
         return args
     if cmd == "clone":
         args = ["wget", "--mirror", "--convert-links", "--adjust-extension",
@@ -142,7 +138,12 @@ def run_subprocess_job(client, chat_id, msg_id, cmd, url, task_id, reply_to,
     full_log = []
     try:
         args = _build_args(cmd, url, task_dir, cookie_file, extra_args)
-        if cmd == "gallery":
+        # Only attach --download-archive for gallery when it's NOT a single
+        # Instagram post/reel (else re-leeching the same post/reel downloads
+        # 0 items via the archive ledger and errors "❌ Nothing downloaded"),
+        # and the user didn't already pass --download-archive in extra_args.
+        from .handlers_instagram import POST_RE as _IG_POST_RE
+        if cmd == "gallery" and not _IG_POST_RE.search(url) and "--download-archive" not in (extra_args or []):
             args += ["--download-archive", archive_db]
         if not shutil.which(args[0]):
             return throttled_edit(client, chat_id, msg_id,

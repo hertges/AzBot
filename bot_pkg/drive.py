@@ -15,7 +15,8 @@ _srv_cache = {}
 _srv_lock = threading.Lock()
 
 def enabled():
-    return bool(config.DRIVE_ACCOUNTS)
+    from . import rclone_driver
+    return bool(config.DRIVE_ACCOUNTS) or rclone_driver.available()
 
 # ONE process-wide lock around every googleapiclient call: the shared
 # service object's httplib2 transport is NOT thread-safe — concurrent
@@ -234,6 +235,16 @@ def upload_file_full(fpath, progress_cb=None, task_id=None, rename=None,
     'Redirected but the response is missing a Location: header' glitch,
     broken pipes, resets). The impl resumes resumable sessions in-place;
     this outer loop rebuilds the session from scratch as a last resort."""
+    # Route to rclone multi-cloud when the chat selected an rclone remote
+    # (and no explicit Drive account was given).
+    if chat_id is not None and not account:
+        from . import state, rclone_driver
+        kind, target_name = state.get_cloud_target(chat_id)
+        if kind == "rclone":
+            return rclone_driver.upload_file_full(
+                fpath, target_name, progress_cb=progress_cb,
+                task_id=task_id, rename=rename, folder=folder,
+            )
     import time as _t
     import httplib2 as _h2
     last = None

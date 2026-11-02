@@ -121,6 +121,56 @@ def set_drive_account(chat_id, name):
     set_pref(chat_id, "drive_account", name)
     invalidate_listing(chat_id)
     reset_drive_nav(chat_id)
+
+
+# ── Multi-cloud target (Google Drive API vs rclone remote) ────────────────
+def get_cloud_target(chat_id):
+    """Returns ('rclone', remote_name) if the chat picked an rclone remote,
+    else ('gdrive', account_name)."""
+    from . import rclone_driver
+    target = get_prefs(chat_id).get("cloud_target", "")
+    if target.startswith("rclone:"):
+        rem = target.split(":", 1)[1]
+        if rem in rclone_driver.list_remotes():
+            return ("rclone", rem)
+    return ("gdrive", get_drive_account(chat_id))
+
+
+def set_cloud_target(chat_id, target):
+    set_pref(chat_id, "cloud_target", target)
+
+
+# ── Per-chat auto-rename template (/setname) ─────────────────────────────
+def get_name_template(chat_id):
+    p = get_prefs(chat_id)
+    return {
+        "prefix": p.get("name_prefix", ""),
+        "suffix": p.get("name_suffix", ""),
+        "strip": p.get("name_strip", []),   # list of substrings to strip
+    }
+
+
+def apply_name_template(chat_id, filepath):
+    """Applies the chat's prefix, suffix, and strip rules to a file on disk
+    (preserving its extension) and returns the new path."""
+    tpl = get_name_template(chat_id)
+    if not (tpl["prefix"] or tpl["suffix"] or tpl["strip"]):
+        return filepath
+    d, base = os.path.dirname(filepath), os.path.basename(filepath)
+    stem, ext = os.path.splitext(base)
+    for word in tpl["strip"]:
+        if word:
+            stem = stem.replace(word, "")
+    stem = re.sub(r"\s{2,}", " ", stem).strip(" -_.") or "file"
+    new_stem = f"{tpl['prefix']}{stem}{tpl['suffix']}".strip()
+    new_path = os.path.join(d, new_stem[:180] + ext)
+    if new_path != filepath:
+        try:
+            os.replace(filepath, new_path)
+            return new_path
+        except OSError:
+            pass
+    return filepath
     return True
 
 # ── Instagram index ledger (flat, per user / type) ──────────────────────

@@ -356,6 +356,49 @@ def _settings_text(chat_id):
 def cmd_settings(client, message):
     message.reply_text(_settings_text(message.chat.id), reply_markup=_settings_kb(message.chat.id))
 
+
+@app.on_message(filters.command("setname") & Authorized)
+@guarded
+def cmd_setname(client, message):
+    """Configure per-chat auto-renaming rules:
+      /setname prefix [AzBot]
+      /setname suffix  - @MyChannel
+      /setname strip [rarbg], www.example.com
+      /setname clear"""
+    parts = message.text.split(maxsplit=2)
+    chat_id = message.chat.id
+    if len(parts) < 2:
+        tpl = state.get_name_template(chat_id)
+        return message.reply_text(
+            "🏷 <b>Auto-Rename Template</b>\n\n"
+            f"• <b>Prefix:</b> <code>{esc(tpl['prefix'] or 'none')}</code>\n"
+            f"• <b>Suffix:</b> <code>{esc(tpl['suffix'] or 'none')}</code>\n"
+            f"• <b>Strip words:</b> <code>{esc(', '.join(tpl['strip']) or 'none')}</code>\n\n"
+            "<b>Commands:</b>\n"
+            "<code>/setname prefix [MyTag] </code>\n"
+            "<code>/setname suffix  @Channel</code>\n"
+            "<code>/setname strip word1, word2</code>\n"
+            "<code>/setname clear</code>"
+        )
+    sub = parts[1].lower()
+    val = parts[2] if len(parts) > 2 else ""
+    if sub == "clear":
+        state.set_pref(chat_id, "name_prefix", "")
+        state.set_pref(chat_id, "name_suffix", "")
+        state.set_pref(chat_id, "name_strip", [])
+        return message.reply_text("🧹 Auto-rename template cleared.")
+    if sub == "prefix":
+        state.set_pref(chat_id, "name_prefix", val)
+    elif sub == "suffix":
+        state.set_pref(chat_id, "name_suffix", val)
+    elif sub == "strip":
+        words = [w.strip() for w in val.split(",") if w.strip()]
+        state.set_pref(chat_id, "name_strip", words)
+    else:
+        return message.reply_text("⚠️ Use <code>prefix</code>, <code>suffix</code>, <code>strip</code>, or <code>clear</code>.")
+    message.reply_text("✅ Auto-rename template updated!")
+
+
 def _render_drive_accounts(cq):
     """Sync body of the ☁️ Drive management screen — shared by the button
     handler AND by add/delete/switch flows that re-render after acting
@@ -363,22 +406,36 @@ def _render_drive_accounts(cq):
     wraps them in coroutines)."""
     chat_id = cq.message.chat.id
     current = state.get_drive_account(chat_id)
+    kind_now, target_now = state.get_cloud_target(chat_id)
     lines = []
     rows = []
     for name in sorted(config.DRIVE_ACCOUNTS):
-        mark = "✅ " if name == current else ""
+        mark = "✅ " if name == current and kind_now == "gdrive" else ""
         lines.append(f"{mark}<code>{esc(name)}</code>")
-        row = [InlineKeyboardButton(("🟢 " if name == current else "") + name,
+        row = [InlineKeyboardButton(("🟢 " if name == current and kind_now == "gdrive" else "") + name,
                                      callback_data=f"acctset:{name}")]
         # only Telegram-registered accounts can be removed here
         if name in _tg_registered_accounts():
             row.append(InlineKeyboardButton("🗑", callback_data=f"acctdel:{name}"))
         rows.append(row)
-    text = ("☁️ <b>Drive accounts</b>\n\n"
+
+    from . import rclone_driver
+    for rem in rclone_driver.list_remotes():
+        is_sel = kind_now == "rclone" and target_now == rem
+        lines.append(f"{'✅ ' if is_sel else ''}🌐 <code>rclone:{esc(rem)}</code>")
+        rows.append([InlineKeyboardButton(
+            ("🟢 " if is_sel else "🌐 ") + f"rclone: {rem}",
+            callback_data=f"rclset:{rem}")])
+
+    cloud_line = (
+        f"\n\n☁️ <b>Cloud</b>: {len(config.DRIVE_ACCOUNTS)} Drive account(s), "
+        f"{len(rclone_driver.list_remotes())} rclone remote(s). "
+        f"This chat uploads to: <b>{esc((target_now or current) or '—')}</b>")
+    text = ("☁️ <b>Drive accounts</b>" + cloud_line + "\n\n"
             + ("\n".join(lines) if lines else "_none configured_")
-            + f"\n\nThis chat uploads to: <b>{esc(current or '—')}</b>\n\n"
-              "➕ adds a new Google account via a sign-in code — no console needed. "
-              "🗑 removes an account added through Telegram (.env accounts are managed in .env).")
+            + "\n\n➕ adds a new Google account via a sign-in code — no console needed. "
+              "🗑 removes an account added through Telegram (.env accounts are managed in .env). "
+              "Use /rclone to import an rclone.conf (Mega, OneDrive, Dropbox, S3…).")
     rows.append([InlineKeyboardButton("➕ Add account", callback_data="acctadd")])
     rows.append([InlineKeyboardButton("⬅️ Back to settings", callback_data="settingsback")])
     safe_edit(cq, text, reply_markup=InlineKeyboardMarkup(rows))
@@ -390,6 +447,15 @@ def _render_drive_accounts(cq):
 def cb_acct_menu(client, cq):
     """☁️ Drive management section: list accounts, add via OAuth device
     flow, remove Telegram-registered ones, pick the active one."""
+    _render_drive_accounts(cq)
+
+
+@app.on_callback_query(filters.regex(r"^rclset:"))
+@guarded
+def cb_rclset(client, cq):
+    rem = cq.data.split(":", 1)[1]
+    state.set_cloud_target(cq.message.chat.id, f"rclone:{rem}")
+    cq.answer(f"☁️ Cloud → rclone:{rem}")
     _render_drive_accounts(cq)
 
 
@@ -540,7 +606,7 @@ def cmd_mirror_leech(client, message):
 
     /igm <profile> — Instagram archive → Drive (per-type subfolders)
     /igl <profile> — Instagram archive → Telegram"""
-    from .utils import parse_payload, split_ytdlp_format
+    from .utils import parse_payload, split_ytdlp_format, split_dash_args
     cmd = message.command[0]
     dest = "drive" if cmd in ("m", "zm", "y", "ytdl", "ym") else "telegram"
     zip_output = cmd in ("zm", "zl")
@@ -553,6 +619,8 @@ def cmd_mirror_leech(client, message):
         raw = parts[1].strip()
     elif message.reply_to_message and (message.reply_to_message.text or message.reply_to_message.caption):
         raw = message.reply_to_message.text or message.reply_to_message.caption
+    # Raw binary flags after a standalone '--' (gallery-dl/wget/aria2c passthrough).
+    raw, extra_cli_args = split_dash_args(raw)
     # raw yt-dlp format selector: trailing " -f <selector>" (their own -f
     # syntax, verbatim). Consumed here so rename/folder parsing never sees it.
     raw, ytdlp_format = split_ytdlp_format(raw)
@@ -570,7 +638,7 @@ def cmd_mirror_leech(client, message):
         if dest_ig == "drive" and not drive.enabled():
             return message.reply_text("☁️ Drive isn't configured — use <code>/igl</code> for Telegram delivery.")
         for u in links:
-            dispatch_instagram(client, message, u, dest_ig)
+            dispatch_instagram(client, message, u, dest_ig, extra_args=extra_cli_args, folder=folder)
         return
 
     if not links:
@@ -630,7 +698,7 @@ def cmd_mirror_leech(client, message):
         state.task_queue.put((run_batch_leech_job,
                                (client, message.chat.id, status.id, links, task_id,
                                 message.id, dest, zip_output, ytdlp_format, folder,
-                                file_anchor(message))))
+                                file_anchor(message), extra_cli_args)))
         return
 
     url = links[0]
@@ -642,35 +710,22 @@ def cmd_mirror_leech(client, message):
             f"⚠️ This exact link is already being downloaded (<code>{esc(active)}</code>). "
             f"Use /cancel {esc(active)} first if you really want it again.")
     _dispatch_one(client, message, cmd, url, dest, zip_output, rename, folder,
-                  format_selector=ytdlp_format)
+                  format_selector=ytdlp_format, extra_args=extra_cli_args)
 
 
 def _dispatch_one(client, message, cmd, url, dest, zip_output, rename=None, folder=None,
-                  format_selector=None):
+                  format_selector=None, extra_args=None):
     if cmd == "torrent":
-        # BUG: this ternary's two branches both evaluated to "telegram"
-        # literally, so it was a no-op that always forced Telegram delivery
-        # regardless of `dest` — currently harmless only because cmd_mirror_
-        # leech() never routes an explicit "/torrent" command through the
-        # drive-dest list, but it silently discarded any future "mirror
-        # this torrent to Drive" support (and made this branch inconsistent
-        # with the equivalent, correct magnet-link handling in
-        # dispatch_link(), which passes `dest` straight through). Just pass
-        # `dest` through here too — callers already validate drive.enabled()
-        # before setting dest="drive" (see cmd_mirror_leech above).
         from .handlers_subproc import queue_subprocess_job
         return queue_subprocess_job(client, message, "torrent", url,
-                                     dest=dest, zip_output=zip_output)
+                                     dest=dest, zip_output=zip_output,
+                                     extra_args=extra_args)
 
-    # Instagram NEVER goes through yt-dlp's quality picker (WZML-X parity:
-    # gallery-dl owns Instagram — photos, carousels and videos alike; the
-    # yt-dlp extractor just errors with "No video formats found!").
-    # Checked FIRST because instagram.com also sits in YTDLP_AUTO_HOSTS —
-    # a later media-page check would shadow it and misroute bare pastes.
     host = _host_of(url)
     if any(host == h or host.endswith("." + h) for h in config.IG_HOSTS):
         from .handlers_instagram import dispatch_instagram
-        return dispatch_instagram(client, message, url, dest)
+        return dispatch_instagram(client, message, url, dest,
+                                  extra_args=extra_args, folder=folder)
 
     # Media-page links get the WZML-X-style quality picker (real resolutions
     # + sizes). Direct files/magnets skip it. An explicit -f selector skips
@@ -774,7 +829,14 @@ def _do_picker(client, message, status_id, url, dest, zip_output, rename, folder
         add_btn(opt["label"], f"ytf:{token}:{i}")
     if row:
         rows.append(row)
-    rows.append([InlineKeyboardButton("❌ Cancel", callback_data=f"ytqcancel:{token}")])
+    subs_on = state.get_prefs(message.chat.id).get("embed_subs", False)
+    rows.append([
+        InlineKeyboardButton(
+            "💬 Subtitles: " + ("✅ ON" if subs_on else "⬜ OFF"),
+            callback_data=f"ytsubs:{token}"
+        ),
+        InlineKeyboardButton("❌ Cancel", callback_data=f"ytqcancel:{token}"),
+    ])
 
     client.edit_message_text(
         message.chat.id, status_id,
@@ -804,6 +866,23 @@ def cb_format_pick(client, cq):
         selector = f"{selector}+ba/b"   # auto-merge best audio
     cq.answer()
     _launch_leech_from_menu(client, cq, token, session, selector)
+
+
+@app.on_callback_query(filters.regex(r"^ytsubs:"))
+@guarded
+def cb_toggle_subs(client, cq):
+    token = cq.data.split(":", 1)[1]
+    session = state.get_quality_session(token)
+    if not session:
+        return cq.answer("Expired — send the link again.", show_alert=True)
+    chat_id = cq.message.chat.id
+    cur = bool(state.get_prefs(chat_id).get("embed_subs", False))
+    state.set_pref(chat_id, "embed_subs", not cur)
+    cq.answer("Subtitles " + ("enabled (will embed into video)" if not cur else "disabled"))
+    title, options = state.PickerFormats.load(token)
+    if options:
+        _do_picker(client, cq.message, cq.message.id, session["url"], session["dest"],
+                   session["zip_output"], None, None, title, options)
 
 
 @app.on_callback_query(filters.regex(r"^ytback:"))
@@ -895,15 +974,18 @@ def cb_quality_retry(client, cq):
         return cq.answer("Expired — send the link again.", show_alert=True)
     cq.answer("Retrying…")
     safe_edit(cq, "🔎 Checking available qualities… (retry)")
-    # Re-run the picker with a FRESH probe; yt-dlp may have recovered.
     try:
-        title, options, _is_pl = engine.probe_qualities(t["url"], cq.message.chat.id)
+        title, options, is_pl = engine.probe_qualities(t["url"], cq.message.chat.id)
+        video_opts = [o for o in options[1:] if "🎵" not in o["label"]]
+        if not is_pl and len(video_opts) <= 1:
+            return queue_leech_job(client, cq.message, t["url"], t["dest"],
+                                   t["zip_output"], rename=t["rename"], folder=t["folder"])
         _do_picker(client, cq.message, cq.message.id, t["url"], t["dest"],
                    t["zip_output"], t["rename"], t["folder"], title, options)
     except Exception as e:
         logger.warning(f"retry probe still failing for {t['url']}: {e}")
-        dispatch_link(client, cq.message, t["url"], t["dest"],
-                      zip_output=t["zip_output"], rename=t["rename"], folder=t["folder"])
+        queue_leech_job(client, cq.message, t["url"], t["dest"],
+                        zip_output=t["zip_output"], rename=t["rename"], folder=t["folder"])
 
 
 def queue_telegram_media_job(client, message, media_msg, dest, zip_output=False,
@@ -1028,7 +1110,7 @@ def _gdrive_file_id(url):
 
 
 def dispatch_link(client, message, url, dest, zip_output=False, rename=None, folder=None,
-                  format_selector=None):
+                  format_selector=None, extra_args=None):
     """Routes url to the right downloader based on what it looks like —
     magnet/torrent, Instagram, a Google Drive file/folder link, or the
     generic yt-dlp/direct-download path — carrying dest/zip/rename/folder
@@ -1038,7 +1120,8 @@ def dispatch_link(client, message, url, dest, zip_output=False, rename=None, fol
 
     if url.startswith("magnet:") or url.lower().endswith(".torrent"):
         from .handlers_subproc import queue_subprocess_job
-        return queue_subprocess_job(client, message, "torrent", url, dest, zip_output)
+        return queue_subprocess_job(client, message, "torrent", url, dest, zip_output,
+                                     extra_args=extra_args)
 
     # Google Drive — file, folder, uc, open?id and usercontent download
     # forms. A recognized link ALWAYS routes to the Drive pipeline here;
@@ -1056,7 +1139,8 @@ def dispatch_link(client, message, url, dest, zip_output=False, rename=None, fol
 
     if any(host == h or host.endswith("." + h) for h in config.IG_HOSTS):
         from .handlers_instagram import dispatch_instagram
-        return dispatch_instagram(client, message, url, dest)
+        return dispatch_instagram(client, message, url, dest,
+                                  extra_args=extra_args, folder=folder)
 
     queue_leech_job(client, message, url, dest, zip_output, rename=rename, folder=folder,
                     format_selector=format_selector)
@@ -1347,7 +1431,7 @@ def _download_gdrive_folder(client, chat_id, msg_id, task_id, folder_meta, task_
 
 
 def queue_leech_job(client, message, url, dest, zip_output=False, format_selector=None,
-                    rename=None, folder=None):
+                    rename=None, folder=None, extra_args=None):
     task_id = new_task_id()
     tag = f" 📦→{config.DEST_LABEL[dest]}" if zip_output else f" →{config.DEST_LABEL[dest]}"
     status = message.reply_text(f"🔎 Queued{tag} — <code>{esc(task_id)}</code>", reply_markup=cancel_kb(task_id))
@@ -1357,12 +1441,12 @@ def queue_leech_job(client, message, url, dest, zip_output=False, format_selecto
     state.task_queue.put((run_leech_job,
                            (client, message.chat.id, status.id, url, task_id, message.id, dest,
                             zip_output, format_selector, rename, folder,
-                            None, True, file_anchor(message))))
+                            None, True, file_anchor(message), extra_args)))
 
 
 def run_batch_leech_job(client, chat_id, msg_id, urls, task_id, reply_to, dest,
                         zip_output=False, format_selector=None, folder=None,
-                        file_anchor=None):
+                        file_anchor=None, extra_args=None):
     """Batch links in ONE job with the Drive-folder look: a single status
     message whose header tracks the batch (📂 Batch — 2/5 processed) while
     each link's own download/upload bar renders underneath it. Links are
@@ -1393,7 +1477,8 @@ def run_batch_leech_job(client, chat_id, msg_id, urls, task_id, reply_to, dest,
                 run_leech_job(client, chat_id, msg_id, url, task_id, reply_to, dest,
                               zip_output, format_selector, None, folder,
                               progress_prefix_fn=prefix_fn, cleanup=False,
-                              file_anchor=file_anchor, on_sent=bump)
+                              file_anchor=file_anchor, on_sent=bump,
+                              extra_args=extra_args)
             except Exception as e:
                 batch["failed"] += 1
                 logger.warning(f"[{task_id}] batch link failed: {e}")
@@ -1421,7 +1506,8 @@ def run_batch_leech_job(client, chat_id, msg_id, urls, task_id, reply_to, dest,
 
 def run_leech_job(client, chat_id, msg_id, url, task_id, reply_to, dest, zip_output=False,
                   format_selector=None, rename=None, folder=None,
-                  progress_prefix_fn=None, cleanup=True, file_anchor=None, on_sent=None):
+                  progress_prefix_fn=None, cleanup=True, file_anchor=None, on_sent=None,
+                  extra_args=None):
     task_dir = os.path.join(config.DOWNLOAD_DIR, task_id)
     _source_thumb_url = None   # original video's thumbnail (YouTube etc.)
     t_start = time.time()
@@ -1458,7 +1544,8 @@ def run_leech_job(client, chat_id, msg_id, url, task_id, reply_to, dest, zip_out
                     return client.send_message(chat_id, text, **kw)
 
             sub_tid = queue_subprocess_job(client, _MsgShim(), "gallery", url,
-                                            dest, zip_output, anchor=file_anchor)
+                                            dest, zip_output,
+                                            extra_args=extra_args, anchor=file_anchor)
             # Leave an explanatory breadcrumb in THIS status bubble instead
             # of a dead "Queued" message pointing at nothing.
             if sub_tid:

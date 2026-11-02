@@ -11,8 +11,12 @@ from .handlers_core import Authorized, cancel_kb
 
 logger = log.get(__name__)
 
-POST_RE = re.compile(r"instagram\.com/(p|reel|tv)/")
-PROFILE_RE = re.compile(r"instagram\.com/([A-Za-z0-9._]+)/?(?:\?|$)")
+POST_RE = re.compile(
+    r"instagram\.com/(?:(?:[A-Za-z0-9._]+/)?(?:p|reel|reels|tv)/|share/(?:p|reel|reels)/|stories/[A-Za-z0-9._]+/\d+)"
+)
+PROFILE_RE = re.compile(
+    r"instagram\.com/(?:stories/)?([A-Za-z0-9._]+)(?:/(?:posts|reels|stories|highlights|tagged))?/?(?:\?.*)?$"
+)
 
 ARCHIVE_URLS = {
     # Explicit sub-extractor URLs — verified against gallery-dl 1.32 source:
@@ -62,21 +66,22 @@ GDL_TUNING_ARGS = [
 GDL_INTER_TYPE_PAUSE_S = 1.0
 
 
-def dispatch_instagram(client, message, url, dest):
+def dispatch_instagram(client, message, url, dest, extra_args=None, folder=None):
     """Entry point used both by /ig and by the universal /m /l dispatcher."""
     if POST_RE.search(url):
         # gallery-dl (not yt-dlp) here on purpose: yt-dlp only pulls video
         # and errors out with "No video formats found!" on photo-only or
         # carousel posts. gallery-dl handles photos/carousels/videos alike.
         from .handlers_subproc import queue_subprocess_job
-        return queue_subprocess_job(client, message, "gallery", url, dest)
+        return queue_subprocess_job(client, message, "gallery", url, dest,
+                                    extra_args=extra_args, folder=folder)
 
     m = PROFILE_RE.search(url)
     if not m:
-        return message.reply_text("Couldn't parse that as an Instagram post or profile link.")
+        return message.reply_text("❌ Couldn't parse that as an Instagram post, reel, story, or profile link.")
     username = m.group(1)
-    if username.lower() in ("p", "reel", "tv", "stories", "explore"):
-        return message.reply_text("Couldn't parse that as a profile link.")
+    if username.lower() in ("p", "reel", "reels", "tv", "stories", "explore", "share", "accounts"):
+        return message.reply_text("❌ Couldn't parse that as a profile link.")
 
     token = state.new_ig_picker_session(username, dest)
     message.reply_text(_ig_picker_text(username, dest), reply_markup=_ig_picker_kb(token))
@@ -112,12 +117,19 @@ def _ig_picker_kb(token):
 @app.on_message(filters.command("ig") & Authorized)
 @guarded
 def cmd_ig(client, message):
+    from .utils import parse_payload, split_dash_args
     parts = message.text.split(maxsplit=1)
-    if len(parts) < 2:
+    raw = parts[1].strip() if len(parts) > 1 else ""
+    if not raw and message.reply_to_message:
+        raw = (message.reply_to_message.text or message.reply_to_message.caption or "").strip()
+    raw, extra_args = split_dash_args(raw)
+    links, _, folder = parse_payload(raw)
+    if not links:
         return message.reply_text(
-            "⚠️ <code>/ig &lt;post_url&gt;</code> or <code>/ig &lt;profile_url&gt;</code> "
-            "(leeches to Telegram — use <code>/m &lt;url&gt;</code> to mirror to Drive instead)")
-    dispatch_instagram(client, message, parts[1].strip(), "telegram")
+            "⚠️ <code>/ig &lt;post_or_profile_url&gt;</code> [<code>-- raw gallery-dl flags</code>]\n"
+            "(leeches to Telegram — use <code>/igm &lt;url&gt;</code> or <code>/m &lt;url&gt;</code> for Drive)")
+    for u in links:
+        dispatch_instagram(client, message, u, "telegram", extra_args=extra_args, folder=folder)
 
 
 # ── /igindex — per-user index manager ────────────────────────────────────
@@ -470,7 +482,9 @@ def run_ig_multi_archive_job(client, chat_id, msg_id, username, types, task_id, 
             # (gallery-dl also downloads already-archived items' metadata without
             # producing files, which stdout counting over-reported).
             downloaded = len(disp.seen)
-            skipped = max(downloaded - sent, 0)
+            # Items gallery-dl skipped because they were already in archive_db
+            # are emitted on stdout with a leading '# ' when gallery-dl skips them:
+            skipped = sum(1 for ln in full_log if ln.startswith("# "))
             note = None
             if sent == 0 and downloaded == 0:
                 tail = "\n".join(full_log[-10:])
