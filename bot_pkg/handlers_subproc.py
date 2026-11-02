@@ -152,7 +152,7 @@ def run_subprocess_job(client, chat_id, msg_id, cmd, url, task_id, reply_to,
         throttled_edit(client, chat_id, msg_id, f"⬇️ <code>/{esc(cmd)}</code>…\n<code>{esc(url[:60])}</code>",
                        markup=cancel_kb(task_id), force=True)
         proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                 universal_newlines=True, bufsize=1)
+                                 universal_newlines=True, bufsize=1, start_new_session=True)
         state.attach_proc(task_id, proc)
 
         last_activity = [time.time()]

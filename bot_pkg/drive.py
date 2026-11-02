@@ -190,7 +190,7 @@ def upload_named_file(name, local_path):
 def list_files(query_extra=None, page_size=20, account=None):
     """Lists files at the configured root level."""
     with _api_lock:
-        srv = get_service()
+        srv = get_service(account)
         if not srv:
             return None
         q_parts = ["trashed = false"]

@@ -68,14 +68,25 @@ def _env_int(name, default):
 
 async def _invoke_part(session, file_id, part_index, total_parts, chunk, sem,
                        on_progress):
-    """Fires one SaveBigFilePart and releases its window slot afterwards."""
+    """Fires one SaveBigFilePart with per-part retry & FloodWait handling
+    so a single transient hiccup never aborts a multi-GB striped upload."""
+    from pyrogram.errors import FloodWait
     try:
-        await session.invoke(raw.functions.upload.SaveBigFilePart(
-            file_id=file_id,
-            file_part=part_index,
-            file_total_parts=total_parts,
-            bytes=chunk,
-        ))
+        for attempt in range(4):
+            try:
+                await session.invoke(raw.functions.upload.SaveBigFilePart(
+                    file_id=file_id,
+                    file_part=part_index,
+                    file_total_parts=total_parts,
+                    bytes=chunk,
+                ))
+                break
+            except FloodWait as fw:
+                await asyncio.sleep(fw.value + 1)
+            except Exception:
+                if attempt == 3:
+                    raise
+                await asyncio.sleep(1.5 * (attempt + 1))
     finally:
         sem.release()
     if on_progress:

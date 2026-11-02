@@ -66,25 +66,25 @@ def cmd_help(client, message):
 def render_help(chat_id, msg_id=None, reply_to=None):
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("⬇️ Downloads", callback_data="help:dl"),
-         InlineKeyboardButton("🗃 Zip", callback_data="help:zip")],
+         InlineKeyboardButton("🗃 Zip & Unpack", callback_data="help:zip")],
         [InlineKeyboardButton("📷 Instagram", callback_data="help:ig"),
-         InlineKeyboardButton("ℹ️ Info", callback_data="help:misc")],
-        [InlineKeyboardButton("🍪 Cookies", callback_data="help:cookies"),
+         InlineKeyboardButton("🍪 Cookies", callback_data="help:cookies")],
+        [InlineKeyboardButton("ℹ️ Tips & Features", callback_data="help:misc"),
          InlineKeyboardButton("🔧 Admin", callback_data="help:admin")],
+        [InlineKeyboardButton("⚙️ Open Settings", callback_data="settingsback"),
+         InlineKeyboardButton("☁️ Open Drive", callback_data="drvrefresh")],
     ])
     text = (
-        "👋 <b>AzLeechBot</b>\n\n"
-        "Paste a link — YouTube, Instagram, TikTok, Twitter/X, Reddit, a "
-        "magnet link, hundreds of other sites — and I'll <b>leech</b> it "
-        "(send it back here) automatically. No command needed for that.\n\n"
-        "<code>/m &lt;link&gt;</code> — <b>mirror</b> to Drive\n"
-        "<code>/l &lt;link&gt;</code> — <b>leech</b> to Telegram (same as pasting)\n"
-        "<code>/zm</code> / <code>/zl</code> — same, zipped first\n\n"
-        "<i>All commands accept multiple links, <code>| newname</code>, and "
-        "<code>#folder</code> for Drive uploads.</i>\n\n"
-        "Uploads go over MTProto directly (Pyrogram) — files up to Telegram's "
-        "~2GB per-file cap go through natively.\n\n"
-        "Tap a section below for the full command list."
+        "⚡ <b>AzLeechBot — MTProto Media &amp; Cloud Manager</b>\n\n"
+        "• <b>Auto-Leech:</b> Paste any link (YouTube, Instagram, TikTok, X, Reddit, Magnet, Direct File) "
+        "and I'll send the file right back here (up to <b>2 GB</b> per part).\n"
+        "• <code>/l &lt;link&gt;</code> — Leech to <b>📱 Telegram</b>\n"
+        "• <code>/m &lt;link&gt;</code> — Mirror to <b>☁️ Google Drive</b>\n"
+        "• <code>/zl</code> · <code>/zm</code> — Zip everything into one archive first\n\n"
+        "💡 <b>Power Grammar:</b>\n"
+        "<code>/m https://site/video | MyName.mp4 #Movies</code>\n"
+        "<i>(Renames the file and uploads into the <code>Movies</code> Drive folder!)</i>\n\n"
+        "👇 <b>Choose a category or quick action below:</b>"
     )
     if msg_id:
         safe_edit(app, chat_id, msg_id, text, reply_markup=kb)
@@ -941,8 +941,8 @@ def run_telegram_media_job(client, chat_id, msg_id, media_msg, task_id, reply_to
             samples.append((current, now))
             if len(samples) > 6:
                 samples.pop(0)
-            text = (f"⬇️ Fetching from Telegram…\n{bar(current, total)}\n"
-                    f"`{fmtsz(current)} / {fmtsz(total)}`  •  {smooth_speed(samples)}")
+            text = (f"⬇️ <b>Fetching from Telegram…</b>\n{bar(current, total)}\n"
+                    f"<code>{fmtsz(current)} / {fmtsz(total)}</code>  •  ⚡ {smooth_speed(samples)}")
             throttled_edit(client, chat_id, msg_id, text, markup=cancel_kb(task_id))
 
         fpath = client.download_media(media_msg, file_name=os.path.join(task_dir, ""), progress=progress)
@@ -977,7 +977,7 @@ def run_telegram_media_job(client, chat_id, msg_id, media_msg, task_id, reply_to
                                         reply_to=file_anchor, task_id=task_id)
         else:
             throttled_edit(client, chat_id, msg_id, "☁️ Uploading to Drive…", markup=cancel_kb(task_id), force=True)
-            info = drive.upload_file_full(fpath, task_id=task_id, rename=rename, folder=folder)
+            info = drive.upload_file_full(fpath, task_id=task_id, rename=rename, folder=folder, chat_id=chat_id)
             if info:
                 links.append(info["link"])
                 file_kb = InlineKeyboardMarkup([[
@@ -1283,7 +1283,7 @@ def _drive_folder_overview(folder_id):
 def _download_gdrive_single(client, chat_id, msg_id, task_id, meta, task_dir):
     fname = meta.get("name", "file")
     fpath = os.path.join(task_dir, fname)
-    throttled_edit(client, chat_id, msg_id, f"⬇️ Downloading from Drive…\n`{fname}`", markup=cancel_kb(task_id), force=True)
+    throttled_edit(client, chat_id, msg_id, f"⬇️ <b>Downloading from Drive…</b>\n<code>{esc(fname)}</code>", markup=cancel_kb(task_id), force=True)
     drive.download_file_content(meta["id"], fpath, task_id=task_id, mime_type=meta.get("mimeType"))
 
 
@@ -1327,7 +1327,7 @@ def _download_gdrive_folder(client, chat_id, msg_id, task_id, folder_meta, task_
                     disp._set_download(fname, 0, expected_total, force=True)
                 else:
                     throttled_edit(client, chat_id, msg_id,
-                                   f"⬇️ Downloading from Drive…\n`{fname}`",
+                                   f"⬇️ <b>Downloading from Drive…</b>\n<code>{esc(fname)}</code>",
                                    markup=cancel_kb(task_id))
                 try:
                     drive.download_file_content(
@@ -1525,7 +1525,7 @@ def run_leech_job(client, chat_id, msg_id, url, task_id, reply_to, dest, zip_out
                 file_kb = None
                 if dest == "drive":
                     throttled_edit(client, chat_id, msg_id, "☁️ Uploading to Drive…", markup=cancel_kb(task_id), force=True)
-                    dinfo = drive.upload_file_full(zpath, task_id=task_id, rename=rename, folder=folder)
+                    dinfo = drive.upload_file_full(zpath, task_id=task_id, rename=rename, folder=folder, chat_id=chat_id)
                     if dinfo:
                         links.append(dinfo["link"])
                         file_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔗 Get link", callback_data=f"qlink:{dinfo['id']}")]])

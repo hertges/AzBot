@@ -176,14 +176,13 @@ def guarded(fn):
             except Exception:
                 anchor_msg_id = None
             if chat_id is not None:
+                err_html = (f"❌ <b>Something went wrong</b> (<code>{esc(fn.__name__)}</code>):\n"
+                            f"<code>{esc(str(e)[:300])}</code>")
                 try:
-                    await client.send_message(chat_id, f"❌ Something went wrong (`{fn.__name__}`):\n`{str(e)[:300]}`",
-                                               reply_to_message_id=anchor_msg_id)
+                    await client.send_message(chat_id, err_html, reply_to_message_id=anchor_msg_id)
                 except Exception:
-                    # anchor_msg_id may itself be gone (deleted message) —
-                    # don't let that swallow the crash report entirely.
                     try:
-                        await client.send_message(chat_id, f"❌ Something went wrong (`{fn.__name__}`):\n`{str(e)[:300]}`")
+                        await client.send_message(chat_id, err_html)
                     except Exception:
                         logger.warning(f"couldn't even report error for {fn.__name__} to chat {chat_id}")
             if hasattr(update, "answer"):  # CallbackQuery — clear the loading spinner

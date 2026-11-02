@@ -624,11 +624,18 @@ def cancel_task(task_id):
     logger.info(f"[{task_id}] cancel requested")
     if proc is not None:
         try:
-            proc.terminate()
+            import signal
             try:
-                proc.wait(timeout=5)
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
             except Exception:
-                proc.kill()
+                proc.terminate()
+            try:
+                proc.wait(timeout=4)
+            except Exception:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except Exception:
+                    proc.kill()
         except Exception as e:
             logger.warning(f"[{task_id}] error terminating process: {e}")
     return True

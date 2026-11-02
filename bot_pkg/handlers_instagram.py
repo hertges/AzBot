@@ -404,7 +404,7 @@ def run_ig_multi_archive_job(client, chat_id, msg_id, username, types, task_id, 
                                       "errors": [], "skipped": 0}
             _edit_live(archive_type, force=True)
             proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                     universal_newlines=True, bufsize=1)
+                                     universal_newlines=True, bufsize=1, start_new_session=True)
             state.attach_proc(task_id, proc)
 
             last_activity = [time.time()]

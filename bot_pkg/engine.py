@@ -368,6 +368,7 @@ def download(url, chat_id, msg_id, task_id, client, dest_dir, format_selector=No
             if is_playlist:
                 opts["postprocessor_hooks"] = [_on_pp]
                 logger.info(f"[{task_id}] playlist detected — streaming entries as they finish")
+        opts["progress_hooks"] = [hook]
         with YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
     except CancelledError:
@@ -555,7 +556,7 @@ def download_direct(url, chat_id, msg_id, task_id, client, dest_dir, label=None,
         # out= pins it to the server's own name up front.
         args += ["-o", fname]
     proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                             universal_newlines=True, bufsize=1)
+                             universal_newlines=True, bufsize=1, start_new_session=True)
     state.attach_proc(task_id, proc)
 
     last_edit = 0.0
@@ -639,6 +640,12 @@ def fix_media_metadata(fpath):
         return fpath
     if not shutil_which("ffmpeg"):
         return fpath
+    # Fast-path: if ffprobe ALREADY sees duration + width + height and it's
+    # not a raw .ts stream, skip rewriting gigabytes on disk!
+    if ext != "ts":
+        meta = _ffprobe_meta(fpath)
+        if meta.get("duration") and meta.get("width") and meta.get("height"):
+            return fpath
     # Temp output keeps the ORIGINAL extension — ffmpeg picks its muxer from
     # it (mp4/matroska/mpegts…), then we atomically swap the remuxed file in.
     tmp = f"{fpath}.remux.{ext}"

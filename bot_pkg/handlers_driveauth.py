@@ -64,7 +64,8 @@ def _register_account(name, refresh_token):
         "client_id": cid, "client_secret": csec, "refresh_token": refresh_token,
     }
     with drive._srv_lock:
-        drive._srv_cache.pop(name, None)
+        for k in [k for k in drive._srv_cache if k[0] == name]:
+            drive._srv_cache.pop(k, None)
     if not state.DEFAULT_ACCOUNT:
         state.DEFAULT_ACCOUNT = name
     _save_override(name, refresh_token)
@@ -104,7 +105,8 @@ def remove_account(name):
         pass
     config.DRIVE_ACCOUNTS.pop(name, None)
     with drive._srv_lock:
-        drive._srv_cache.pop(name, None)
+        for k in [k for k in drive._srv_cache if k[0] == name]:
+            drive._srv_cache.pop(k, None)
     logger.info(f"drive account '{name}' removed")
 
 

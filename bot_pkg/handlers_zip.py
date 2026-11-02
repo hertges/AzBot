@@ -1168,7 +1168,7 @@ def run_zip_job(client, chat_id, msg_id, sources, task_id, reply_to, dest, renam
                     from . import engine
                     sub = os.path.join(work, f"src{i:02d}")
                     os.makedirs(sub, exist_ok=True)
-                    if engine.is_direct_file_link(obj) or engine.probe_is_direct_file(obj):
+                    if engine.is_direct_file_link(obj) or engine.probe_direct(obj)[1]:
                         fp = engine.download_direct(obj, chat_id, msg_id, task_id, client, sub)
                     else:
                         fp, _ = engine.download(obj, chat_id, msg_id, task_id, client, sub)

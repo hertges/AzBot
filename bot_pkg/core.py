@@ -206,4 +206,32 @@ def start():
     # dead code objects) goes back to the OS before the first idle reading
     release_ram()
     logger.info("AzLeechBot starting (Pyrogram, native >50MB uploads)…")
-    app.run()
+    from pyrogram.types import BotCommand
+    async def _boot():
+        await app.start()
+        try:
+            await app.set_bot_commands([
+                BotCommand("l", "Leech link/file to Telegram"),
+                BotCommand("m", "Mirror link/file to Google Drive"),
+                BotCommand("zl", "Download & zip into one archive (Telegram)"),
+                BotCommand("zm", "Download & zip into one archive (Drive)"),
+                BotCommand("ig", "Archive Instagram profile/post/stories"),
+                BotCommand("igindex", "Manage saved Instagram archive indexes"),
+                BotCommand("unzip", "Extract archive (.zip/.rar/.7z) to chat"),
+                BotCommand("unzipm", "Extract archive directly to Drive"),
+                BotCommand("unzipmulti", "Collect multi-part archive & extract"),
+                BotCommand("drive", "Browse & manage Google Drive files"),
+                BotCommand("drivesearch", "Search files in Google Drive"),
+                BotCommand("cookie", "Manage cookies.txt profiles"),
+                BotCommand("settings", "Toggle auto-clean, albums, document mode & Drive"),
+                BotCommand("stats", "Show disk, RAM, crypto & active jobs"),
+                BotCommand("cancel", "Stop a running job by ID"),
+                BotCommand("help", "Interactive command guide"),
+            ])
+        except Exception as e:
+            logger.warning(f"set_bot_commands skipped: {e}")
+        from pyrogram import idle
+        await idle()
+        await app.stop()
+
+    app.run(_boot())
