@@ -103,6 +103,7 @@ app = Client(
     # the same file in parallel, which is the single biggest lever for
     # large-file Telegram upload/download speed.
     max_concurrent_transmissions=4,  # 4 saves ~50% MTProto buffer RAM vs 8 on <512MB hosts
+    sleep_threshold=0,  # Let our own handlers/throttled_edit manage FloodWait without stalling the session
 )
 
 def _bg_worker(worker_id):

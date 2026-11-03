@@ -319,18 +319,28 @@ class LiveDispatcher:
                 ext_l = os.path.splitext(fpath)[1].lower()
                 small_video = False
                 vmeta = None
-                if ext_l in uploader.VIDEO_EXT and fsize <= ALBUM_VIDEO_MAX_BYTES:
+                valid_photo = False
+                if ext_l in uploader.VIDEO_EXT and 1024 < fsize <= ALBUM_VIDEO_MAX_BYTES:
                     # Album video entries NEED real duration/dimensions —
                     # zero-attribute videos in a media group come back as
                     # MEDIA_EMPTY (the "some images sent as singles" bug).
                     vmeta = uploader.probe_meta_if_media(fpath)
-                    if vmeta.get("duration"):
+                    if (vmeta.get("duration") and int(vmeta.get("width") or 0) > 0
+                            and int(vmeta.get("height") or 0) > 0):
                         small_video = True
-                if ((ext_l in uploader.PHOTO_EXT or small_video)
+                elif ext_l in uploader.PHOTO_EXT and 1024 < fsize <= 10 * 1024 * 1024:
+                    # Verify real JPEG/PNG header + Telegram aspect ratio (<= 20:1)
+                    # & dimension sum (<= 10000) so poison files don't kill a
+                    # whole 10-item group with MEDIA_EMPTY.
+                    w, h = uploader._image_dimensions_fast(fpath)
+                    if w > 0 and h > 0 and (w + h) <= 10000 \
+                            and (max(w, h) / max(1, min(w, h))) <= 20:
+                        valid_photo = True
+                if ((valid_photo or small_video)
                         and not state.get_as_document(self.chat_id)
                         and state.get_media_group(self.chat_id)
                         and self.dest != "drive"):
-                    kind = "photo" if ext_l in uploader.PHOTO_EXT else "video"
+                    kind = "photo" if valid_photo else "video"
                     cap = (f"{self.caption_prefix} · {uploader._clean_caption(fpath)}"
                            if self.caption_prefix else None)
                     batch = None
@@ -442,27 +452,48 @@ class LiveDispatcher:
         used to arrive individually with name captions)."""
         import pyrogram
         media = []
-        for p, cap, _fs, kind, meta in items:
-            if kind == "video":
-                meta = meta or {}
-                media.append(pyrogram.types.InputMediaVideo(
-                    media=p, caption=cap,
-                    parse_mode=pyrogram.enums.ParseMode.DISABLED,
-                    duration=int(meta.get("duration") or 0),
-                    width=int(meta.get("width") or 0),
-                    height=int(meta.get("height") or 0),
-                    supports_streaming=True))
-            else:
-                media.append(pyrogram.types.InputMediaPhoto(
-                    media=p, caption=cap, parse_mode=pyrogram.enums.ParseMode.DISABLED))
+        thumbs = []
         try:
-            self.client.send_media_group(self.chat_id, media,
-                                         reply_to_message_id=self.reply_to)
-        except FloodWait as e:
-            logger.warning(f"album FloodWait {e.value}s — retrying group once")
-            time.sleep(e.value + 1)
-            self.client.send_media_group(self.chat_id, media,
-                                         reply_to_message_id=self.reply_to)
+            for p, cap, _fs, kind, meta in items:
+                if not os.path.exists(p) or os.path.getsize(p) <= 0:
+                    continue
+                if kind == "video":
+                    meta = meta or {}
+                    dur = max(1, int(meta.get("duration") or 1))
+                    w = int(meta.get("width") or 0)
+                    h = int(meta.get("height") or 0)
+                    tpath = uploader._auto_video_thumb(p, dur)
+                    if tpath:
+                        thumbs.append(tpath)
+                    media.append(pyrogram.types.InputMediaVideo(
+                        media=p,
+                        thumb=tpath,
+                        caption=cap,
+                        parse_mode=pyrogram.enums.ParseMode.DISABLED,
+                        duration=dur,
+                        width=w,
+                        height=h,
+                        supports_streaming=True))
+                else:
+                    media.append(pyrogram.types.InputMediaPhoto(
+                        media=p, caption=cap, parse_mode=pyrogram.enums.ParseMode.DISABLED))
+            if len(media) < 2:
+                raise RuntimeError("fewer than 2 valid items in media group")
+            try:
+                self.client.send_media_group(self.chat_id, media,
+                                             reply_to_message_id=self.reply_to)
+            except FloodWait as e:
+                logger.warning(f"album FloodWait {e.value}s — retrying group once")
+                time.sleep(e.value + 1)
+                self.client.send_media_group(self.chat_id, media,
+                                             reply_to_message_id=self.reply_to)
+            # Small pacing gap after a 10-item group in supergroups (-100...)
+            # so consecutive albums don't trip Telegram's 20-msg/min group limit
+            if str(self.chat_id).startswith("-100"):
+                time.sleep(3.0)
+        finally:
+            for t in thumbs:
+                uploader._cleanup(t)
 
     def _send_album_single(self, p, cap, fs):
         """One buffered entry delivered as a single (trailing leftover, or

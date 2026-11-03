@@ -344,11 +344,13 @@ _pending = {}
 _timers = {}
 _flood_until = {}   # key -> timestamp until which edits must wait out a FloodWait
 MIN_GAP = 2.5
+GROUP_MIN_GAP = 4.5  # Supergroups/channels (-100...) have stricter 20/min edit limits
 
 def throttled_edit(client, chat_id, msg_id, text, markup=None, force=False):
     if not msg_id:
         return
     key = (chat_id, msg_id)
+    min_gap = GROUP_MIN_GAP if int(chat_id or 0) < 0 else MIN_GAP
 
     def _do():
         with _lock:
@@ -390,7 +392,12 @@ def throttled_edit(client, chat_id, msg_id, text, markup=None, force=False):
         existing = _timers.get(key)
         if existing:
             existing.cancel()
-        delay = 0.05 if (force or gap >= MIN_GAP) else (MIN_GAP - gap + 0.05)
+        if force:
+            # Even forced transitions must leave a 1.5s breather in groups
+            # to prevent EditMessage FloodWaits.
+            delay = 0.05 if gap >= 1.5 else (1.5 - gap)
+        else:
+            delay = 0.05 if gap >= min_gap else (min_gap - gap + 0.05)
         if flood_left > 0:
             # A flood is active for this message — don't fire into it; the
             # edit goes out right after Telegram stops rejecting it.
