@@ -1647,7 +1647,8 @@ def run_leech_job(client, chat_id, msg_id, url, task_id, reply_to, dest, zip_out
                     if "disp" not in disp_holder:
                         disp_holder["disp"] = LiveDispatcher(
                             client, chat_id, msg_id, task_dir, dest,
-                            reply_to=file_anchor, task_id=task_id, max_workers=2,
+                            reply_to=file_anchor, task_id=task_id,
+                            max_workers=config.UPLOAD_WORKERS,
                             watch=False,   # info-dict hook is the ONLY feed
                             on_sent=on_sent)
                         throttled_edit(client, chat_id, msg_id,

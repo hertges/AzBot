@@ -24,6 +24,8 @@ cd "$(dirname "$0")" || exit 1
 BIN="$HOME/bin"
 mkdir -p "$BIN"
 export PATH="$BIN:$PATH"
+export MALLOC_ARENA_MAX=2
+export PYTHONOPTIMIZE=1
 
 say() { echo "[azbot] $*"; }
 die() { echo "[azbot] FATAL: $*" >&2; exit 1; }

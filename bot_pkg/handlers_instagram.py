@@ -406,7 +406,7 @@ def run_ig_multi_archive_job(client, chat_id, msg_id, username, types, task_id, 
             disp = LiveDispatcher(client, chat_id, msg_id, type_dir, dest, reply_to=anchor or None,
                                    task_id=task_id, folder=drive_folder,
                                    caption_prefix=f"{icon.get(archive_type, '📷')} {archive_type.title()}",
-                                   quiet=True, max_workers=2,
+                                   quiet=True, max_workers=config.UPLOAD_WORKERS,
                                    on_sent=lambda fp, fs: _edit_live(cur[0]))
 
             logger.info(f"[{task_id}] /ig {archive_type} for @{username} starting (dest={dest})")

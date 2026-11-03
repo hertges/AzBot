@@ -312,7 +312,7 @@ def _upload_file_full_impl(fpath, progress_cb=None, task_id=None, rename=None,
     elif config.DRIVE_FOLDER_ID:
         meta["parents"] = [config.DRIVE_FOLDER_ID]
 
-    media = MediaFileUpload(fpath, chunksize=16 * 1024 * 1024, resumable=True)
+    media = MediaFileUpload(fpath, chunksize=4 * 1024 * 1024, resumable=True)
     req = srv.files().create(body=meta, media_body=media, fields="id, webViewLink")
     response = None
     import time as _t
@@ -505,7 +505,7 @@ def download_file_content(file_id, dest_path, task_id=None, mime_type=None, prog
             # container the 50MB buffer, stacked on pyrogram + any
             # overlapping upload, is part of the restart profile.
             # 16MB resumable chunks are just as fast on normal links.
-            downloader = MediaIoBaseDownload(fh, request, chunksize=16 * 1024 * 1024)
+            downloader = MediaIoBaseDownload(fh, request, chunksize=4 * 1024 * 1024)
             done = False
             while not done:
                 if task_id and state.is_cancelled(task_id):

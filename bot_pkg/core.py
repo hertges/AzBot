@@ -102,7 +102,7 @@ app = Client(
     # single connection. Raising this lets Pyrogram push multiple parts of
     # the same file in parallel, which is the single biggest lever for
     # large-file Telegram upload/download speed.
-    max_concurrent_transmissions=8,
+    max_concurrent_transmissions=4,  # 4 saves ~50% MTProto buffer RAM vs 8 on <512MB hosts
 )
 
 def _bg_worker(worker_id):

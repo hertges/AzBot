@@ -584,9 +584,32 @@ def disk_free_mb():
     return shutil.disk_usage(config.DOWNLOAD_DIR).free // (1024 * 1024)
 
 def ram_free_mb():
-    """Available RAM in MB (Linux /proc/meminfo MemAvailable — the number
-    the kernel OOM killer actually acts on). Returns a huge value when
-    unavailable (non-Linux dev) so RAM guards stay open."""
+    """Available RAM in MB — respects Docker/container cgroup v2 & v1 limits
+    first! (/proc/meminfo shows the host node's 64 GB RAM, which blinded
+    every RAM guard inside a 512 MB container)."""
+    # 1. Cgroup v2 (modern Docker / Kubernetes / Pterodactyl)
+    try:
+        with open("/sys/fs/cgroup/memory.max", encoding="ascii") as f:
+            val = f.read().strip()
+        if val != "max":
+            limit = int(val)
+            if limit < (1 << 40):  # real container limit (<1 TB)
+                with open("/sys/fs/cgroup/memory.current", encoding="ascii") as f2:
+                    used = int(f2.read().strip())
+                return max(0, (limit - used) // (1024 * 1024))
+    except Exception:
+        pass
+    # 2. Cgroup v1
+    try:
+        with open("/sys/fs/cgroup/memory/memory.limit_in_bytes", encoding="ascii") as f:
+            limit = int(f.read().strip())
+        if limit < (1 << 40):
+            with open("/sys/fs/cgroup/memory/memory.usage_in_bytes", encoding="ascii") as f2:
+                used = int(f2.read().strip())
+            return max(0, (limit - used) // (1024 * 1024))
+    except Exception:
+        pass
+    # 3. Fallback to host /proc/meminfo
     try:
         with open("/proc/meminfo", encoding="ascii") as fh:
             for line in fh:
@@ -594,7 +617,7 @@ def ram_free_mb():
                     return int(line.split()[1]) // 1024
     except Exception:
         pass
-    return 1 << 20
+    return 256  # safe low default
 
 def ensure_free(mb=config.MIN_FREE_MB):
     if disk_free_mb() >= mb:

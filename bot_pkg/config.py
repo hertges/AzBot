@@ -75,35 +75,29 @@ MIN_FREE_MB = 300
 # no "native" way past it without switching to a user account.
 TG_MAX_FILE_BYTES = 2 * 1000 * 1000 * 1000  # ~2GB
 
-# Concurrent per-job upload workers (LiveDispatcher). Default 2: with the
-# RAM gates in place (striped auto-fallback, thumb skip, 16MB Drive chunks,
-# ffmpeg -threads 2) two concurrent sends are safe and give ~2x throughput
-# on multi-file jobs (albums + big files overlap with the download).
-UPLOAD_WORKERS = int(os.environ.get("UPLOAD_WORKERS", "2") or 2)
+# Concurrent per-job upload workers (LiveDispatcher). Default 1 on sub-512MB
+# containers; raise via env (UPLOAD_WORKERS) if you have headroom.
+UPLOAD_WORKERS = int(os.environ.get("UPLOAD_WORKERS", "1") or 1)
 
-# Concurrent DRIVE uploads, process-wide. Default 2: per-thread service
-# objects removed the shared-transport corruption that forced 1 for a
-# while; 2 doubles Drive-mirror throughput. Drop back to 1 in .env if you
-# ever see instability.
-DRIVE_UPLOAD_CONCURRENCY = int(os.environ.get("DRIVE_UPLOAD_CONCURRENCY", "2") or 2)
-# Concurrent job workers (each = one download+upload pipeline). On a
-# memory-tight host, 2 keeps the bot responsive to new commands while
-# halving worst-case concurrent subprocess/buffer load vs the old
-# hardcoded 4 — raise via env if you serve many chats at once.
-QUEUE_WORKERS = int(os.environ.get("QUEUE_WORKERS", "2") or 2)
+# Concurrent DRIVE uploads, process-wide. Default 1 — per-thread service
+# objects removed the shared-transport corruption, but 2 concurrent Drive
+# uploads still double chunk-buffer RAM on a tight box.
+DRIVE_UPLOAD_CONCURRENCY = int(os.environ.get("DRIVE_UPLOAD_CONCURRENCY", "1") or 1)
+# Concurrent job workers (each = one download+upload pipeline). 1 keeps the
+# bot responsive while halving worst-case concurrent subprocess/buffer load
+# vs the old hardcoded 4 — raise via env if you serve many chats at once.
+QUEUE_WORKERS = int(os.environ.get("QUEUE_WORKERS", "1") or 1)
 # asyncio.to_thread pool for message/callback handlers (see utils.guarded).
 # Must comfortably exceed the number of simultaneously-slow things a handler
 # can legally do (yt-dlp probes, Drive listings, ffprobe) so taps and
-# commands never queue behind them.
+# commands never queue behind them. Default 6 on sub-512MB boxes.
 # BUG (crash on deploy): a blank env var (e.g. HANDLER_WORKERS= copied
-# verbatim from .env.example, common on platforms that always set every
-# declared key) makes os.environ.get(name, default) return "" — the
-# EMPTY STRING, not the default — since .get()'s default only applies
+# verbatim from .env.example) makes os.environ.get(name, default) return ""
+# — the EMPTY STRING, not the default — since .get()'s default only applies
 # when the key is absent, not when it's present-but-blank. int("") then
-# raises ValueError and kills the bot before it can even start. Same
-# fix as API_ID above: `or <default>` catches "" too, since empty
-# string is falsy.
-HANDLER_WORKERS = int(os.environ.get("HANDLER_WORKERS", "16") or 16)
+# raises ValueError and kills the bot before it can even start. Same fix as
+# API_ID above: `or <default>` catches "" too, since empty string is falsy.
+HANDLER_WORKERS = int(os.environ.get("HANDLER_WORKERS", "6") or 6)
 
 # ── Link classification ─────────────────────────────────────────────────
 # Anything on this list, pasted with no command, gets auto-leeched.

@@ -145,8 +145,8 @@ async def upload_and_send(client, chat_id, path, *, kind="document",
     # multiplier — in-flight buffers are only 512KB each, so 4×24 ≈ 12MB
     # peak RAM. (The OOM restarts came from Drive chunk buffers and
     # ungated ffmpeg — both gated now — not from these buffers.)
-    n_sessions = n_sessions or _env_int("UPLOAD_SESSIONS", 4)
-    window = window or _env_int("UPLOAD_WINDOW", 24)
+    n_sessions = n_sessions or _env_int("UPLOAD_SESSIONS", 2)
+    window = window or _env_int("UPLOAD_WINDOW", 8)
 
     file_id = client.rnd_id()
     total_parts = math.ceil(size / PART_SIZE)

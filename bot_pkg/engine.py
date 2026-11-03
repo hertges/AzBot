@@ -68,7 +68,7 @@ def _ydl_base_opts(chat_id, outtmpl):
         # (~1MB each) and this is the main DASH-stream download speed
         # lever. The old 4 was an OOM-era revert; every real OOM source
         # (Drive chunk buffers, ungated ffmpeg) is individually gated now.
-        "concurrent_fragment_downloads": 8,
+        "concurrent_fragment_downloads": 3,
         # WZML-X-style fast, bounded retry sleeps instead of yt-dlp's
         # exponential backoff (which looks exactly like "stuck").
         "retry_sleep_functions": {
@@ -664,8 +664,12 @@ def fix_media_metadata(fpath):
     # Temp output keeps the ORIGINAL extension — ffmpeg picks its muxer from
     # it (mp4/matroska/mpegts…), then we atomically swap the remuxed file in.
     tmp = f"{fpath}.remux.{ext}"
-    args = ["ffmpeg", "-y", "-loglevel", "error", "-i", fpath,
-            "-map", "0", "-c", "copy", "-movflags", "+faststart", tmp]
+    # Do NOT use +faststart on files >300MB on a 512MB box — shifting the
+    # moov atom to the front of a 1.5GB MP4 spikes ffmpeg + page-cache memory.
+    fsize = os.path.getsize(fpath) if os.path.exists(fpath) else 0
+    faststart = ["-movflags", "+faststart"] if fsize < 300 * 1024 * 1024 else []
+    args = (["ffmpeg", "-y", "-loglevel", "error", "-threads", "1", "-i", fpath,
+             "-map", "0", "-c", "copy"] + faststart + [tmp])
     try:
         import subprocess as sp
         r = sp.run(args, capture_output=True, text=True, timeout=300)

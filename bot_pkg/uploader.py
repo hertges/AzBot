@@ -413,9 +413,7 @@ def _split_upload_video(client, chat_id, fpath, msg_id, reply_to, task_id):
     if duration <= 0:
         # can't determine duration — fall back to byte split (lazily, one
         # part on disk at a time — see iter_split_parts)
-    size = os.path.getsize(fpath)
-    fpath = state.apply_name_template(chat_id, fpath)
-    size = os.path.getsize(fpath)
+        size = os.path.getsize(fpath)
         total = -(-size // config.TG_MAX_FILE_BYTES)
         out = []
         for i, p in enumerate(iter_split_parts(fpath, config.TG_MAX_FILE_BYTES), 1):
@@ -446,9 +444,12 @@ def _split_upload_video(client, chat_id, fpath, msg_id, reply_to, task_id):
             raise CancelledError("upload cancelled by user")
         start = (i - 1) * seg_len
         part = f"{base}.part{i:03d}{ext}"
-        args = ["ffmpeg", "-y", "-loglevel", "error", "-threads", "2",
+        # NOTE: Removed "-movflags +faststart" here! On a ~1GB segment, +faststart
+        # does a second pass and buffers the large MP4 moov atom in RAM,
+        # spiking memory past 512MB.
+        args = ["ffmpeg", "-y", "-loglevel", "error", "-threads", "1",
                 "-ss", f"{start:.3f}", "-i", fpath, "-t", f"{seg_len:.3f}",
-                "-map", "0", "-c", "copy", "-movflags", "+faststart", part]
+                "-map", "0", "-c", "copy", part]
         r = sp.run(args, capture_output=True, text=True, timeout=1800)
         if r.returncode != 0 or not os.path.exists(part) or os.path.getsize(part) == 0:
             err = (r.stderr[-200:] if r.stderr else "empty output").strip()
@@ -460,8 +461,6 @@ def _split_upload_video(client, chat_id, fpath, msg_id, reply_to, task_id):
                                  reply_to=reply_to, task_id=task_id, video_meta=vmeta))
         _cleanup(part)   # delete right after upload — our own rule
     if not results:
-        # Total failure: keep the source and say so — the old code deleted
-        # it and returned [], which the caller counted as sent.
         raise RuntimeError(f"video split failed ({total} segments): " + "; ".join(seg_errors[:3]))
     if seg_errors:
         logger.warning(f"video split partial ({len(results)}/{total} sent): " + "; ".join(seg_errors[:3]))
