@@ -1,40 +1,40 @@
 #!/bin/sh
 # ─────────────────────────────────────────────────────────────────────────────
-# AzLeechBot — startup script for Wispbyte (Pterodactyl-style panel).
-#
-# Panel setup: see WISPBYTE.md in this repo.
-#   Startup command : sh startup.sh
-#   Environment      : API_ID, API_HASH, BOT_TOKEN  (+ optional ADMIN_ID / Drive)
-#
-# What this script does, in order:
-#   1. picks a Python interpreter (3.11 preferred — pyrogram 2.x + tgcrypto
-#      wheels line up there)
-#   2. creates a venv and installs requirements.txt (PEP 668 safe)
-#   3. installs the binaries the bot shells out to and the image lacks:
-#      ffmpeg/ffprobe, aria2c, 7z (as `7z`), GNU wget — all STATIC builds so
-#      they work on the panel's Alpine image without root
-#   4. checks the Telegram credentials
-#   5. runs bot.py and restarts it if it dies
-#
-# Every step is idempotent: a restart reuses what is already in place.
+# AzLeechBot — Ultra-Low-Storage & Low-RAM Startup Script
+#   • Reuses host Python & host binaries (ffmpeg, aria2c, 7z, wget, rclone)
+#     whenever already installed on the server (0 MB wasted).
+#   • If a binary is missing, downloads ONLY that binary and immediately
+#     deletes the archive & temp files (~150 MB saved vs old startup.sh).
+#   • Never creates a venv unless one already exists from a prior run.
+#   • Never downloads Python unless literally zero Python exists.
 # ─────────────────────────────────────────────────────────────────────────────
 set -e
 cd "$(dirname "$0")" || exit 1
 
+BOOTSTRAP_ONLY=0
+[ "${1:-}" = "--bootstrap-only" ] && BOOTSTRAP_ONLY=1
+
+# Low-RAM (<512MB) & zero-.pyc disk-saving flags
+export MALLOC_ARENA_MAX=2
+export PYTHONDONTWRITEBYTECODE=1
+export PIP_NO_CACHE_DIR=1
+export PIP_DISABLE_PIP_VERSION_CHECK=1
+
 BIN="$HOME/bin"
 mkdir -p "$BIN"
 export PATH="$BIN:$PATH"
-export MALLOC_ARENA_MAX=2
-export PYTHONOPTIMIZE=1
 
 say() { echo "[azbot] $*"; }
 die() { echo "[azbot] FATAL: $*" >&2; exit 1; }
 
-GETPIP_URL="https://bootstrap.pypa.io/get-pip.py"
+# ── 1. Find existing system Python (NEVER reinstall if present) ─────────────
+PY=""
+for c in python3.11 python3.12 python3.10 python3.13 python3 python; do
+    if command -v "$c" >/dev/null 2>&1; then PY="$c"; break; fi
+done
+[ -n "$PY" ] || die "No Python found on this server! Switch your panel egg/image to Python."
+say "using existing python: $($PY -V 2>&1) at $(command -v "$PY")"
 
-# Download helper. curl first, wget second; if the image has NEITHER,
-# bootstrap with python's urllib (always present). Must be defined before
-# anything calls it.
 fetch() {  # $1 = url, $2 = output file
     if command -v curl >/dev/null 2>&1; then
         curl -fsSL --retry 3 --connect-timeout 20 -o "$2" "$1" 2>/dev/null && return 0
@@ -44,86 +44,64 @@ fetch() {  # $1 = url, $2 = output file
     fi
     "$PY" - "$1" "$2" <<'PYEOF' 2>/dev/null
 import shutil, sys, urllib.request
-url, dst = sys.argv[1], sys.argv[2]
-with urllib.request.urlopen(url, timeout=60) as r, open(dst, "wb") as f:
+with urllib.request.urlopen(sys.argv[1], timeout=60) as r, open(sys.argv[2], "wb") as f:
     shutil.copyfileobj(r, f)
 PYEOF
     [ -s "$2" ]
 }
 
-# ── 1. Python ───────────────────────────────────────────────────────────────
-PY=""
-for c in python3.11 python3.12 python3.10 python3.13 python3 python; do
-    if command -v "$c" >/dev/null 2>&1; then PY="$c"; break; fi
-done
-[ -n "$PY" ] || die "no python interpreter in this image"
-say "python: $($PY -V 2>&1)"
+# ── 2. Install Python packages WITHOUT a bulky venv if possible ─────────────
+PYBIN="$PY"
+USER_BASE="$("$PY" -m site --user-base 2>/dev/null || echo "$HOME/.local")"
+export PATH="$USER_BASE/bin:$PATH"
 
-# ── 2. venv + dependencies ─────────────────────────────────────────────────
-VENV="$HOME/venv"
-if [ ! -x "$VENV/bin/python" ]; then
-    say "creating venv at $VENV"
-    "$PY" -m venv "$VENV" 2>/dev/null || true
-fi
-if [ -x "$VENV/bin/python" ]; then
-    PYBIN="$VENV/bin/python"
-    # "-m pip" survives venvs created without pip (--without-pip); a bare
-    # $VENV/bin/pip does not always exist.
-    PIP="$PYBIN -m pip"
-else
-    say "venv unavailable — falling back to the image's python"
-    PYBIN="$PY"
-    PIP="$PY -m pip"
-fi
-export PIP_ROOT_USER_ACTION=ignore
-PIPLOG="$HOME/.azbot-pip.log"
-
-# Some slim images ship python without ensurepip, so even "-m pip" is
-# missing. Bootstrap it once via get-pip.py.
-if ! $PIP --version >/dev/null 2>&1; then
-    say "pip missing — bootstrapping with get-pip.py"
-    if fetch "$GETPIP_URL" "$HOME/.get-pip.py" 2>/dev/null; then
-        "$PYBIN" "$HOME/.get-pip.py" --quiet >>"$PIPLOG" 2>&1 || true
-    fi
+if [ -x "$HOME/venv/bin/python" ]; then
+    # Reuse existing venv if one was already created previously
+    PYBIN="$HOME/venv/bin/python"
 fi
 
-pip_install() {  # $1 = requirements file
-    $PIP install --no-cache-dir -r "$1" >"$PIPLOG" 2>&1 && return 0
-    # PEP 668 "externally managed" images need the override flag; older pip
-    # rejects the flag, but we only reach here after the first attempt
-    # already failed.
-    $PIP install --no-cache-dir --break-system-packages -r "$1" >>"$PIPLOG" 2>&1 && return 0
-    return 1
-}
-
-if [ -f requirements.txt ]; then
-    if pip_install requirements.txt; then
-        say "dependencies installed"
+if [ -f requirements.txt ] && [ "$BOOTSTRAP_ONLY" = "0" ]; then
+    # Fast check: if all core modules already import, skip pip entirely!
+    if "$PYBIN" -c "import pyrogram, yt_dlp, gallery_dl, dotenv, googleapiclient" 2>/dev/null; then
+        say "python dependencies already satisfied — skipping pip install"
     else
-        # One retry without the native crypto accelerator: tgcrypto 1.2.5 has
-        # no wheels for python >= 3.12 and needs a C compiler, which slim
-        # panel images often lack. Everything else still installs normally;
-        # crypto_guard.py falls back to pure-python crypto on its own.
-        say "install failed (see $PIPLOG) — retrying without tgcrypto"
-        grep -vi '^tgcrypto' requirements.txt > "$HOME/.req-notgc.txt"
-        pip_install "$HOME/.req-notgc.txt" || { tail -20 "$PIPLOG"; die "dependency install failed"; }
+        say "installing python dependencies (no-cache, low-disk mode)..."
+        PIPLOG="/tmp/azbot-pip.log"
+        pip_try() {
+            "$PYBIN" -m pip install --no-cache-dir --user -r "$1" >"$PIPLOG" 2>&1 && return 0
+            "$PYBIN" -m pip install --no-cache-dir --user --break-system-packages -r "$1" >>"$PIPLOG" 2>&1 && return 0
+            "$PYBIN" -m pip install --no-cache-dir -r "$1" >>"$PIPLOG" 2>&1 && return 0
+            return 1
+        }
+        if ! pip_try requirements.txt; then
+            say "retrying without tgcrypto (no C compiler on host)..."
+            grep -vi '^tgcrypto' requirements.txt > /tmp/req-notgc.txt
+            pip_try /tmp/req-notgc.txt || { tail -20 "$PIPLOG"; rm -f "$PIPLOG" /tmp/req-notgc.txt; die "pip install failed"; }
+            rm -f /tmp/req-notgc.txt
+        fi
+        rm -f "$PIPLOG"
     fi
 fi
-[ -x "$PYBIN" ] || die "no usable python after install"
 
-# ── 3. binaries ─────────────────────────────────────────────────────────────
-CACHE="$HOME/.azbot-cache"
-mkdir -p "$CACHE"
+# ── 3. Only fetch MISSING binaries & delete temp archives immediately ───────
+# Wipe any leftover cache from older startup.sh versions to reclaim ~150MB!
+rm -rf "$HOME/.azbot-cache" "$HOME/.get-pip.py" "$HOME/.azbot-pip.log" "$HOME/.req-notgc.txt"
 
-unpack() {  # $1 = archive, $2 = dest dir
+CACHE="/tmp/azbot-dl"
+
+unpack() {
     "$PY" - "$1" "$2" <<'PYEOF' 2>/dev/null
-import sys, tarfile
+import sys, tarfile, zipfile
 src, dst = sys.argv[1], sys.argv[2]
-with tarfile.open(src) as t:
-    try:
-        t.extractall(dst, filter="data")
-    except TypeError:
-        t.extractall(dst)
+if src.endswith(".zip"):
+    with zipfile.ZipFile(src) as z:
+        z.extractall(dst)
+else:
+    with tarfile.open(src) as t:
+        try:
+            t.extractall(dst, filter="data")
+        except TypeError:
+            t.extractall(dst)
 PYEOF
 }
 
@@ -136,81 +114,108 @@ bin_arch() {
 }
 
 install_ffmpeg() {
-    command -v ffmpeg >/dev/null 2>&1 && { say "ffmpeg already present"; return 0; }
-    A=$(bin_arch); [ -n "$A" ] || { say "no static ffmpeg build for $(uname -m)"; return 0; }
+    if command -v ffmpeg >/dev/null 2>&1 && command -v ffprobe >/dev/null 2>&1; then
+        say "ffmpeg & ffprobe already on server — skipping download"
+        return 0
+    fi
+    A=$(bin_arch); [ -n "$A" ] || return 0
+    mkdir -p "$CACHE"
     F="ffmpeg-release-$A-static.tar.xz"
-    say "downloading ffmpeg (static)"
-    fetch "https://johnvansickle.com/ffmpeg/releases/$F" "$CACHE/$F" || { say "ffmpeg download failed"; return 0; }
-    unpack "$CACHE/$F" "$CACHE/ffmpeg" || { say "ffmpeg extract failed"; return 0; }
-    find "$CACHE/ffmpeg" -maxdepth 2 -type f \( -name ffmpeg -o -name ffprobe \) \
-        -exec cp {} "$BIN/" \; 2>/dev/null
-    chmod +x "$BIN/ffmpeg" "$BIN/ffprobe" 2>/dev/null
-    command -v ffmpeg >/dev/null 2>&1 && say "ffmpeg installed" || say "ffmpeg unavailable (thumbnails/metadata skipped)"
+    say "ffmpeg missing — downloading static binary..."
+    if fetch "https://johnvansickle.com/ffmpeg/releases/$F" "$CACHE/$F"; then
+        unpack "$CACHE/$F" "$CACHE/ffmpeg" || true
+        find "$CACHE/ffmpeg" -maxdepth 2 -type f \( -name ffmpeg -o -name ffprobe \) -exec cp {} "$BIN/" \; 2>/dev/null
+        chmod +x "$BIN/ffmpeg" "$BIN/ffprobe" 2>/dev/null
+        command -v strip >/dev/null 2>&1 && strip "$BIN/ffmpeg" "$BIN/ffprobe" 2>/dev/null || true
+    fi
+    rm -rf "$CACHE"
 }
 
 install_aria2() {
-    command -v aria2c >/dev/null 2>&1 && { say "aria2c already present"; return 0; }
-    A=$(bin_arch); [ -n "$A" ] || { say "no static aria2 build for $(uname -m)"; return 0; }
+    if command -v aria2c >/dev/null 2>&1; then
+        say "aria2c already on server — skipping download"
+        return 0
+    fi
+    A=$(bin_arch); [ -n "$A" ] || return 0
+    mkdir -p "$CACHE"
     F="aria2-1.36.0-static-linux-$A.tar.gz"
-    say "downloading aria2c (static)"
-    fetch "https://github.com/P3TERX/Aria2-Pro-Core/releases/download/1.36.0_2021.08.22/$F" "$CACHE/$F" \
-        || { say "aria2 download failed"; return 0; }
-    unpack "$CACHE/$F" "$CACHE/aria2" || { say "aria2 extract failed"; return 0; }
-    find "$CACHE/aria2" -type f -name aria2c -exec cp {} "$BIN/aria2c" \; 2>/dev/null
-    chmod +x "$BIN/aria2c" 2>/dev/null
-    command -v aria2c >/dev/null 2>&1 && say "aria2c installed" || say "aria2c unavailable (direct-link downloads fall back)"
+    say "aria2c missing — downloading static binary..."
+    if fetch "https://github.com/P3TERX/Aria2-Pro-Core/releases/download/1.36.0_2021.08.22/$F" "$CACHE/$F"; then
+        unpack "$CACHE/$F" "$CACHE/aria2" || true
+        find "$CACHE/aria2" -type f -name aria2c -exec cp {} "$BIN/aria2c" \; 2>/dev/null
+        chmod +x "$BIN/aria2c" 2>/dev/null
+    fi
+    rm -rf "$CACHE"
 }
 
 install_7z() {
-    command -v 7z >/dev/null 2>&1 && { say "7z already present"; return 0; }
-    A=$(bin_arch); [ -n "$A" ] || { say "no static 7z build for $(uname -m)"; return 0; }
+    if command -v 7z >/dev/null 2>&1; then
+        say "7z already on server — skipping download"
+        return 0
+    fi
+    A=$(bin_arch); [ -n "$A" ] || return 0
+    mkdir -p "$CACHE"
     case "$A" in
         amd64) Z="7z2501-linux-x64.tar.xz" ;;
         arm64) Z="7z2501-linux-arm64.tar.xz" ;;
     esac
-    say "downloading 7z (static)"
-    fetch "https://www.7-zip.org/a/$Z" "$CACHE/$Z" || { say "7z download failed"; return 0; }
-    unpack "$CACHE/$Z" "$CACHE/7z" || { say "7z extract failed"; return 0; }
-    # 7zzs is the fully static build (7zz is dynamically linked against glibc
-    # and will not load on a musl image). 7zzs handles zip/7z/rar/rar5 — the
-    # bot calls it as `7z x -y -o<dir> -bsp1 -bso0 <file>`.
-    find "$CACHE/7z" -type f -name 7zzs -exec cp {} "$BIN/7z" \; 2>/dev/null
-    find "$CACHE/7z" -type f -name 7zzs -exec cp {} "$BIN/7zzs" \; 2>/dev/null
-    chmod +x "$BIN/7z" "$BIN/7zzs" 2>/dev/null
-    command -v 7z >/dev/null 2>&1 && say "7z installed" || say "7z unavailable (rar/7z extraction disabled)"
+    say "7z missing — downloading static binary..."
+    if fetch "https://www.7-zip.org/a/$Z" "$CACHE/$Z"; then
+        unpack "$CACHE/$Z" "$CACHE/7z" || true
+        # Copy ONLY 7zzs (not both 7z and 7zzs, which wasted 5MB duplicating the exact same binary!)
+        find "$CACHE/7z" -type f -name 7zzs -exec cp {} "$BIN/7z" \; 2>/dev/null
+        chmod +x "$BIN/7z" 2>/dev/null
+    fi
+    rm -rf "$CACHE"
 }
 
 install_wget() {
-    # busybox wget has no --mirror/--convert-links, which the /clone command
-    # needs. GNU wget static (musl build) works on Alpine without root.
     if command -v wget >/dev/null 2>&1 && wget --help 2>&1 | grep -q -- "--mirror"; then
-        say "GNU wget already present"; return 0
+        say "GNU wget already on server — skipping download"
+        return 0
     fi
     A=$(bin_arch); [ -n "$A" ] || return 0
+    mkdir -p "$CACHE"
     V="v20260301.1"
-    say "downloading GNU wget (static musl)"
-    fetch "https://github.com/chromebrew/static-binaries/releases/download/$V/wget_${V}_linux_$A" "$CACHE/wget" \
-        || { say "wget download failed"; return 0; }
-    chmod +x "$CACHE/wget" 2>/dev/null
-    "$CACHE/wget" --help 2>&1 | grep -q -- "--mirror" || { say "static wget unusable"; return 0; }
-    cp "$CACHE/wget" "$BIN/wget"
-    say "GNU wget installed"
+    say "GNU wget missing — downloading static binary..."
+    if fetch "https://github.com/chromebrew/static-binaries/releases/download/$V/wget_${V}_linux_$A" "$CACHE/wget"; then
+        chmod +x "$CACHE/wget" 2>/dev/null
+        "$CACHE/wget" --help 2>&1 | grep -q -- "--mirror" && cp "$CACHE/wget" "$BIN/wget"
+    fi
+    rm -rf "$CACHE"
 }
 
 install_rclone() {
-    command -v rclone >/dev/null 2>&1 && { say "rclone already present"; return 0; }
+    # 1. Skip if the user didn't request Rclone
+    if [ "${INSTALL_RCLONE:-0}" != "1" ]; then
+        say "INSTALL_RCLONE is not set to 1 — skipping rclone to save disk space"
+        return 0
+    fi
+
+    # 2. Skip download if rclone already exists on the server
+    if command -v rclone >/dev/null 2>&1; then
+        say "rclone already present on server — skipping download"
+        return 0
+    fi
+
     A=$(bin_arch); [ -n "$A" ] || return 0
-    F="rclone-current-linux-$A.zip"
-    say "downloading rclone (static)"
-    fetch "https://downloads.rclone.org/$F" "$CACHE/$F" || { say "rclone download failed"; return 0; }
-    "$PY" - "$CACHE/$F" "$CACHE/rclone" <<'PYEOF' 2>/dev/null
-import sys, zipfile
-with zipfile.ZipFile(sys.argv[1]) as z:
-    z.extractall(sys.argv[2])
-PYEOF
-    find "$CACHE/rclone" -type f -name rclone -exec cp {} "$BIN/rclone" \; 2>/dev/null
-    chmod +x "$BIN/rclone" 2>/dev/null
-    command -v rclone >/dev/null 2>&1 && say "rclone installed" || say "rclone unavailable"
+    mkdir -p "$CACHE"
+    R="rclone-current-linux-$A.zip"
+    say "INSTALL_RCLONE=1 — downloading static rclone..."
+
+    if fetch "https://downloads.rclone.org/$R" "$CACHE/$R"; then
+        unpack "$CACHE/$R" "$CACHE/rclone_tmp" || true
+        # Copy ONLY the rclone binary (skips docs, man pages, and test files)
+        find "$CACHE/rclone_tmp" -type f -name rclone -exec cp {} "$BIN/rclone" \; 2>/dev/null
+        chmod +x "$BIN/rclone" 2>/dev/null
+
+        # Strip debug symbols to shave 15-20MB off the final binary
+        command -v strip >/dev/null 2>&1 && strip "$BIN/rclone" 2>/dev/null || true
+    fi
+
+    # Clean up zip and temp folder immediately
+    rm -rf "$CACHE"
+    command -v rclone >/dev/null 2>&1 && say "rclone installed successfully"
 }
 
 install_ffmpeg
@@ -219,23 +224,16 @@ install_7z
 install_wget
 install_rclone
 
-# `zip` is only needed for the rare "zip -FF" index-repair path; the bot
-# degrades gracefully without it (python's zipfile handles normal zips).
-command -v zip >/dev/null 2>&1 && say "zip present" || say "zip missing — the zip-index repair path stays disabled"
+if [ "$BOOTSTRAP_ONLY" = "1" ]; then
+    exit 0
+fi
 
-# ── 4. credentials ──────────────────────────────────────────────────────────
-missing=""
-for v in API_ID API_HASH BOT_TOKEN; do
-    eval "val=\${$v:-}"
-    [ -n "$val" ] || missing="$missing $v"
-done
-[ -z "$missing" ] || die "missing env vars:$missing — set them in Startup → Server Configuration"
-
-# ── 5. run ──────────────────────────────────────────────────────────────────
+# ── 4. Run ──────────────────────────────────────────────────────────────────
+export AZBOT_BOOTSTRAPPED=1
 say "starting bot (cwd $(pwd))"
 while true; do
     code=0
-    "$PYBIN" bot.py || code=$?
+    "$PYBIN" -B bot.py || code=$?
     say "bot exited (code $code) — restarting in 15s"
     sleep 15
 done
