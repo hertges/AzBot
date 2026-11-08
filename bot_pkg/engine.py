@@ -1,4 +1,4 @@
-import os, time, re, subprocess, requests, mimetypes
+import os, time, re, subprocess, shutil, requests, mimetypes
 
 from yt_dlp import YoutubeDL
 
@@ -546,16 +546,67 @@ def _server_name_via_get(url):
 
 def download_direct(url, chat_id, msg_id, task_id, client, dest_dir, label=None,
                     progress_prefix_fn=None):
-    """Direct file link — downloaded via aria2c (16 connections) instead of
-    a single-stream `requests` fetch for real multi-connection speed, and
-    with --content-disposition=true so the file is named exactly what the
-    server calls it rather than guessed from the URL path. The probe's
-    filename (when the server gives one) is shown live during download —
-    progress used to be nameless, which made multi-file jobs opaque.
-    label — optional extra line (multipart runners pass "Part 2/14" so the
-    per-part bar carries its position in the set)."""
+    """Direct file link — downloaded via aria2c (16 connections) when available,
+    with an automatic pure-Python requests streaming fallback when aria2c is
+    not installed on the server."""
     os.makedirs(dest_dir, exist_ok=True)
     fname, _is_direct = probe_direct(url)
+    if fname:
+        # Confine to bare basename so hostile Content-Disposition headers can't escape dest_dir
+        fname = os.path.basename(fname.replace("\\", "/")).strip() or None
+
+    # ── Path A: Pure-Python streaming fallback when aria2c is missing ────────
+    if not shutil.which("aria2c"):
+        logger.info(f"[{task_id}] aria2c not found — using Python requests stream for {url}")
+        with requests.get(url, stream=True, timeout=60, allow_redirects=True, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/125.0.0.0 Safari/537.36"
+        }) as r:
+            r.raise_for_status()
+            if not fname:
+                cd = r.headers.get("content-disposition", "")
+                m = re.search(r"filename\*?=(?:UTF-8'')?\"?([^\";]+)", cd)
+                if m:
+                    fname = os.path.basename(m.group(1).strip().replace("\\", "/"))
+            if not fname:
+                path_part = (r.url or url).split("?")[0].rstrip("/").rsplit("/", 1)[-1]
+                fname = path_part if "." in path_part else f"{task_id}.bin"
+
+            fpath = os.path.join(dest_dir, fname)
+            total_b = int(r.headers.get("content-length") or 0)
+            done_b = 0
+            last_edit = 0.0
+            samples = []
+
+            with open(fpath, "wb") as fh:
+                for chunk in r.iter_content(chunk_size=1024 * 1024):  # 1MB chunks (low RAM)
+                    if state.is_cancelled(task_id):
+                        raise CancelledError("cancelled by user")
+                    if not chunk:
+                        continue
+                    fh.write(chunk)
+                    done_b += len(chunk)
+                    now = time.time()
+                    if now - last_edit < 1.5 and (not total_b or done_b < total_b):
+                        continue
+                    last_edit = now
+                    samples.append((done_b, now))
+                    if len(samples) > 6:
+                        samples.pop(0)
+                    head = f"📄 <code>{esc(fname)}</code>\n" if fname else ""
+                    lbl = f"{label}\n" if label else ""
+                    prefix = progress_prefix_fn() if progress_prefix_fn else ""
+                    if prefix:
+                        prefix += "\n"
+                    text = (f"{prefix}⬇️ <b>Downloading</b>\n{lbl}{head}"
+                            f"{progress_line('⬇️', done_b, total_b)}\n⚡ {smooth_speed(samples)}")
+                    throttled_edit(client, chat_id, msg_id, text, markup=cancel_kb(task_id))
+
+        if not os.path.exists(fpath) or os.path.getsize(fpath) == 0:
+            raise DownloadError("Download reported success but file is empty")
+        logger.info(f"[{task_id}] direct download (requests) done — {fpath} ({fmtsz(os.path.getsize(fpath))})")
+        return fpath
+
+    # ── Path B: Fast multi-connection aria2c download ────────────────────────
     if fname:
         logger.info(f"[{task_id}] direct download (aria2c) — server name: {fname!r}")
     else:
@@ -567,8 +618,6 @@ def download_direct(url, chat_id, msg_id, task_id, client, dest_dir, label=None,
         "-d", dest_dir, url,
     ]
     if fname:
-        # aria2c names it from the LAST redirect hop's path (a UUID blob);
-        # out= pins it to the server's own name up front.
         args += ["-o", fname]
     proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                              universal_newlines=True, bufsize=1, start_new_session=True)
@@ -590,7 +639,7 @@ def download_direct(url, chat_id, msg_id, task_id, client, dest_dir, label=None,
             try:
                 done_b, total_b = _parse_aria2_size(done), _parse_aria2_size(total)
             except ValueError:
-                continue  # one odd line must never kill the drain loop
+                continue
             head = (f"📄 <code>{esc(fname)}</code>\n" if fname else "")
             lbl = (f"{label}\n" if label else "")
             prefix = progress_prefix_fn() if progress_prefix_fn else ""
@@ -600,8 +649,6 @@ def download_direct(url, chat_id, msg_id, task_id, client, dest_dir, label=None,
                     f"{progress_line('⬇️', done_b, total_b)}\n⚡ {spd}/s")
             throttled_edit(client, chat_id, msg_id, text, markup=cancel_kb(task_id))
     except (AttributeError, ValueError):
-        # stdout can be None/closed when the process was just terminated
-        # by /cancel — that's expected teardown, not an error.
         pass
 
     proc.wait()
