@@ -194,9 +194,9 @@ def start():
     from . import (handlers_core, handlers_admin, handlers_shell, handlers_subproc,
                    handlers_instagram, handlers_drive, handlers_zip,
                    handlers_driveauth, handlers_fallback,
-                   handlers_pixeldrain)  # noqa: F401
+                   handlers_pixeldrain, handlers_uploadam)  # noqa: F401
     logger.info("handlers registered: core, admin+shell, subproc, instagram+zip, drive+auth, "
-                "fallback, pixeldrain")
+                "fallback, pixeldrain, uploadam")
     try:
         from . import build_info
         logger.info(f"build: {build_info.build_line()} — if this stamp doesn't move "
