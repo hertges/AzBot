@@ -115,6 +115,8 @@ HELP = {
            "<code>/zipl</code> · <code>/zipm</code> · <code>/unzip</code> · "
            "<code>/unzipm</code> · <code>/unzipmulti</code> — see the 🗃 Zip section\n\n"
            "<code>/drive</code> — browse Drive: get links, send files here, rename/delete, new folders • <code>/drivesearch &lt;q&gt;</code>\n\n"
+           "<code>/px</code> — reply to a file: upload it to pixeldrain and get a public "
+           "download link back\n\n"
            "Magnet links are auto-detected in plain messages too. Reply to any file or link instead of typing a URL."),
     "ig": ("📷 <b>Instagram</b>\n\n"
            "<code>&lt;post/reel url&gt;</code> — just paste it, leeched like any other link "
