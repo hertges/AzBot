@@ -7,6 +7,19 @@ Telegram's MTProto layer via [Pyrogram](https://docs.pyrogram.org), not the
 HTTP Bot API, so files up to Telegram's real per-file limit for bots
 (~2GB) go through natively — no 50MB wall, no local Bot API server needed.
 
+## v19 changelog — public links (`/px`, `/ua`)
+
+- `/px` — reply to a file → pixeldrain link + direct download URL.
+- `/ua <url>` / `/ualist` — upload.am fetches the file server-side; no local
+  disk used at all, which is what makes files larger than the VPS disk work.
+- `bot_pkg/keyring.py` — shared multi-credential rotation for both hosts:
+  comma/newline env lists, last-good-first ordering, quota cooldown,
+  permanent drop for revoked keys, and per-service error classification so
+  a per-IP limit doesn't trigger pointless rotation.
+- Every failure names the host and the actual error code; when the keyless
+  x0.at fallback serves a file the reply says so.
+- These live on the `beta` branch. `main` is unchanged.
+
 ## v18 changelog
 
 Aligned with WZML-X's actual implementation (source-verified, not guessed):
@@ -242,10 +255,68 @@ deletes it in both places. Rename the folder with `DATA_DRIVE_FOLDER=…`.
   set `ADMIN_ID` to an account you trust, and don't expose the bot token
   or `.env` to anyone else.
 - `/allow <id>` / `/ban <id>` — admin: access control, if `ADMIN_ID` is set.
+- `/px` — reply to a file and the bot uploads it to **pixeldrain** and
+  replies with the shareable page plus a `/api/file/<id>?download` direct
+  link. Needs a free key from
+  <https://pixeldrain.com/user/api_keys>. Give `PIXELDRAIN_API_KEYS`
+  several comma-separated keys and a full account rotates to the next one;
+  the last working key is tried first, so the normal case is one attempt.
+  A revoked key is dropped for good. With `PIXELDRAIN_FALLBACK=1` (default)
+  and no key able to take the file, it falls back to keyless **x0.at**
+  (1 GiB, 3–100 day links) and says which host served it.
+- `/ua <direct url>` — **upload.am fetches the file on its own servers**, so
+  nothing at all is downloaded to this box. That is the point on a small
+  VPS: a 4 GB file costs the bot zero local bytes. Free plan is 25 GB
+  storage, 5 GB per file, files kept 30 days after the last download. The
+  fetch is asynchronous and upload.am has no progress endpoint, so the bot
+  snapshots your file list, queues the fetch, then polls until the new file
+  appears (`UA_POLL_MIN`, default 20 minutes), then posts the link. Needs
+  `UA_TOKENS` (upload.am → Account → API); multiple accounts rotate the same
+  way as pixeldrain. Direct links only — the URL must start the download
+  itself, not open a page, so YouTube/Instagram pages still go through
+  yt-dlp to local disk.
+- `/ualist` — newest files in the upload.am account root, with links.
 
 Google Drive upload is optional — leave `GCP_CLIENT_ID` etc. blank and
 `/m`, `/zm`, `/drive`, and `/drivesearch` will just tell you it's not
 configured instead of failing silently.
+
+## Public links & cloud fetch
+
+Three destinations, picked by command:
+
+- `/m`, `/zm` → **Google Drive** (needs GCP creds)
+- `/l`, plain paste → **Telegram**
+- `/px`, `/ua` → **a public URL** — the two things a Telegram upload or a
+  Drive upload can't give you: something another script or bot can fetch.
+
+Both `/px` and `/ua` accept a list of credentials (`PIXELDRAIN_API_KEYS`,
+`UA_TOKENS`; comma or newline separated) and rotate automatically. The
+shared `bot_pkg/keyring.py` keeps per-credential state in
+`data/<host>_keys.json` — only a SHA-256 fingerprint, never the key itself —
+and distinguishes three outcomes per error code:
+
+- **rotate** — another account may well succeed (quota, plan limit)
+- **dead** — this credential is permanently unusable (revoked, banned)
+- **neither** — a per-IP limit, an oversized file, or a server-side fault;
+  the bot stops and reports the real reason instead of burning through keys
+  that cannot fix it
+
+That distinction is why the error messages name the actual code
+(`ip_rate_limit_reached`, `user_out_of_space`, `unsafe_url`, …) rather than
+saying "upload failed": a per-IP limit is not something a second account
+solves, and pretending otherwise just wastes time and keys.
+
+Host limits, for reference:
+
+| host | free storage | per file | link lifetime |
+|---|---|---|---|
+| pixeldrain | 10 GB | 10 GB | ~60 days idle |
+| upload.am | 25 GB | 5 GB | 30 days after last download |
+| x0.at (fallback) | — | 1 GiB | 3–100 days, picked by size |
+
+pixeldrain throttles **downloads** to 6 GB/day per IP; that is a download
+limit, not an upload one, and rotation does not change it.
 
 ## Reliability
 

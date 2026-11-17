@@ -6,18 +6,27 @@ neither can hand an outside script a fetchable URL, which is the point here.
 
 Env:
   PIXELDRAIN_API_KEYS=key1,key2,key3   # comma/newline separated, tried in order
-  PIXELDRAIN_COOLDOWN_H=6              # hours a "full" key is skipped before retry
-  PIXELDRAIN_FALLBACK=0                # set to disable the keyless x0.at fallback
+  PIXELDRAIN_API_KEY=key1              # singular form, still accepted
+  PIXELDRAIN_COOLDOWN_H=6              # hours a full account is skipped
+  PIXELDRAIN_FALLBACK=1                # 0 disables the keyless x0.at fallback
 
-Rotation: pixeldrain answers with machine-readable `value` codes, so the bot can
-tell "this ACCOUNT is out of space" (rotate) from "this IP is rate limited"
-(rotating is useless — say so instead of retrying every key for nothing).
+Rotation lives in keyring.py. pixeldrain answers with machine-readable `value`
+codes, which is what lets the bot tell "this ACCOUNT is out of space" (rotate)
+from "this IP is rate limited" (rotating is useless — say so rather than retry
+every key for nothing).
+
+Errors you can hit, and what happens:
+  user_out_of_space / too_many_files       account is full → next key
+  email_address_not_verified               account can't upload yet → next key
+  authentication_required / account_banned key revoked or banned → dropped for good
+  ip_banned                                this server's IP is banned → hard error
+  file_too_large                           over 10 GB, or over the plan cap → hard error
+  ip_rate_limit_reached (429)              per-IP limit → hard error, rotation won't help
+  writing / internal (5xx)                 pixeldrain-side problem → hard error
+  every key unusable                       → x0.at fallback (1 GiB, keyless)
 """
-import hashlib
-import json
 import os
 import shutil
-import threading
 import time
 from urllib.parse import quote
 
@@ -27,78 +36,30 @@ from pyrogram.types import Message
 
 from . import config, state, log
 from .core import app
+from .keyring import Keyring
 from .utils import bar, esc, fmtsz, guarded, new_task_id, safe_edit, throttled_edit
 
 logger = log.get(__name__)
 
 BASE = "https://pixeldrain.com/api"
-STATE_FILE = os.path.join(config.DATA_DIR, "pd_keys.json")
-COOLDOWN_S = max(1, int(os.environ.get("PIXELDRAIN_COOLDOWN_H", "6") or 6)) * 3600
 
-# per-account problems: another key may well succeed
-ROTATE_COOLDOWN = {"user_out_of_space", "too_many_files", "email_address_not_verified"}
-# per-account problems that will not fix themselves
-ROTATE_DEAD = {"authentication_required", "account_banned"}
-
-_lock = threading.Lock()
+# pixeldrain documents stable `value` codes for every failure, so rotation can be
+# decided on the code instead of guessing from the HTTP status.
+KEYS = Keyring(
+    "pixeldrain", "PIXELDRAIN_API_KEYS",
+    extra_env=("PIXELDRAIN_API_KEY",),
+    rotate={"user_out_of_space", "too_many_files", "email_address_not_verified"},
+    dead={"authentication_required", "account_banned", "ip_banned"},
+    cooldown_s=max(1, int(os.environ.get("PIXELDRAIN_COOLDOWN_H", "6") or 6)) * 3600,
+)
 
 
 class UploadError(Exception):
     pass
 
 
-def _keys():
-    raw = os.environ.get("PIXELDRAIN_API_KEYS") or os.environ.get("PIXELDRAIN_API_KEY") or ""
-    return [k.strip() for k in raw.replace("\n", ",").split(",") if k.strip()]
-
-
 def _fallback_on():
     return (os.environ.get("PIXELDRAIN_FALLBACK", "1") or "1").strip() not in ("0", "false", "no")
-
-
-def _fp(key):
-    return hashlib.sha256(key.encode()).hexdigest()[:12]
-
-
-def _load():
-    try:
-        with open(STATE_FILE) as f:
-            d = json.load(f)
-            return d if isinstance(d, dict) else {}
-    except Exception:
-        return {}
-
-
-def _save(d):
-    try:
-        tmp = STATE_FILE + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(d, f)
-        os.replace(tmp, STATE_FILE)
-    except Exception as e:
-        logger.warning(f"pixeldrain: couldn't save key state: {e}")
-
-
-def _order(keys, st, now):
-    """Keys usable right now: dead and cooled-down (full) ones are skipped.
-
-    Skipping is what makes the cooldown real — a key marked full is not retried
-    on every upload, only after PIXELDRAIN_COOLDOWN_H. Last known good key first
-    so the common case is a single attempt.
-    """
-    usable = []
-    for k in keys:
-        e = st.get(_fp(k), {})
-        if e.get("state") == "dead":
-            continue
-        if e.get("state") == "full" and e.get("until", 0) > now:
-            continue
-        usable.append(k)
-    last = st.get("_last_good")
-    if last in usable:
-        usable.remove(last)
-        usable.insert(0, last)
-    return usable
 
 
 def _put(path, key, progress):
@@ -124,7 +85,7 @@ def _put(path, key, progress):
         data = r.json()
     except Exception:
         data = {}
-    if r.status_code == 201 and data.get("success"):
+    if r.status_code in (200, 201) and data.get("success"):
         return data
     raise _Err(r.status_code, data)
 
@@ -133,13 +94,14 @@ class _Err(UploadError):
     def __init__(self, status, data):
         self.status = status
         self.value = data.get("value") or f"http_{status}"
-        super().__init__(data.get("message") or self.value)
+        self.message = data.get("message") or self.value
+        super().__init__(self.message)
 
 
 def _x0(path):
     size = os.path.getsize(path)
     if size > 1024 * 1024 * 1024:
-        raise UploadError("file is over x0.at's 1 GiB limit and every pixeldrain key is exhausted")
+        raise UploadError("file is over x0.at's 1 GiB limit and no pixeldrain key accepted it")
     with open(path, "rb") as f:
         r = requests.post("https://x0.at", files={"file": (os.path.basename(path), f)},
                           timeout=(30, 600))
@@ -155,58 +117,45 @@ def upload(path, progress=None):
 
     Returns {"host", "url", "direct", "note"}.
     """
-    keys = _keys()
-    if not keys:
-        if _fallback_on():
-            return _x0(path)
-        raise UploadError("no PIXELDRAIN_API_KEYS configured")
-
     if os.path.getsize(path) > 10 * 1024 ** 3:
         raise UploadError("file is over pixeldrain's 10 GB single-file cap")
 
-    now = time.time()
-    with _lock:
-        st = _load()
-        order = _order(keys, st, now)
-        if not order:
-            # everything is cooling down: probe the non-dead keys once anyway,
-            # otherwise a recovered account would sit unused for the full window
-            order = [k for k in keys if st.get(_fp(k), {}).get("state") != "dead"]
+    order = KEYS.order()
+    if not order:
+        if _fallback_on():
+            return _x0(path)
+        raise UploadError("no PIXELDRAIN_API_KEYS configured, and the fallback is off")
 
-    last_err = None
+    last = None
     for key in order:
         try:
             data = _put(path, key, progress)
         except _Err as e:
-            last_err = e
-            if e.value in ROTATE_DEAD or e.value in ROTATE_COOLDOWN:
-                with _lock:
-                    st = _load()
-                    st[_fp(key)] = {"state": "dead" if e.value in ROTATE_DEAD else "full",
-                                    "until": now + COOLDOWN_S, "value": e.value}
-                    _save(st)
-                logger.warning(f"pixeldrain: key {_fp(key)} -> {e.value}, rotating")
+            last = e
+            kind = KEYS.classify(e.value)
+            if kind == "dead":
+                KEYS.mark_dead(key, e.value)
                 continue
-            # file_too_large / ip_rate_limit_reached / ip_banned / writing — retrying
-            # another key cannot help, and neither can the fallback for ip_banned.
-            raise UploadError(f"pixeldrain: {e.value} — {e}")
+            if kind == "rotate":
+                KEYS.mark_full(key, e.value)
+                continue
+            # file_too_large / ip_rate_limit_reached / writing / internal: another
+            # key cannot help, and the fallback cannot rescue an IP ban either.
+            raise UploadError(f"pixeldrain: {e.value} — {e.message}")
         except Exception as e:
             raise UploadError(f"pixeldrain upload failed: {e}")
 
         fid = data.get("id")
-        with _lock:
-            st = _load()
-            st.pop(_fp(key), None)
-            st["_last_good"] = key
-            _save(st)
-        logger.info(f"pixeldrain: uploaded {os.path.basename(path)} as {fid} with key {_fp(key)}")
+        KEYS.mark_good(key)
+        logger.info(f"pixeldrain: uploaded {os.path.basename(path)} as {fid} "
+                    f"with key {KEYS.fp(key)}")
         return {"host": "pixeldrain", "url": f"https://pixeldrain.com/u/{fid}",
                 "direct": f"{BASE}/file/{fid}?download", "note": ""}
 
     if _fallback_on():
         return _x0(path)
-    why = f" ({last_err.value})" if last_err else ""
-    raise UploadError(f"every pixeldrain key is out of space{why}")
+    why = f" ({last.value})" if last else ""
+    raise UploadError(f"every pixeldrain key is unusable{why}")
 
 
 # ── /px handler ────────────────────────────────────────────────────────────
@@ -228,7 +177,7 @@ def cmd_px(client, message):
         return message.reply_text(
             "🔗 Reply to a file with <code>/px</code> and I'll upload it to "
             "pixeldrain and return a public link.")
-    if not _keys() and not _fallback_on():
+    if not KEYS.configured() and not _fallback_on():
         return message.reply_text(
             "⚠️ Nothing configured: set <code>PIXELDRAIN_API_KEYS</code> in .env "
             "or re-enable the fallback host.")

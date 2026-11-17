@@ -9,9 +9,23 @@ handler snapshots the root file list, queues the fetch, then polls until a file
 that wasn't there before shows up.
 
 Env:
-  UA_TOKEN=ua_live_xxx    # upload.am → Account → API (required)
-  UA_FOLDER_UUID=         # optional destination folder, default account root
-  UA_POLL_MIN=20          # minutes to wait for the file to appear (default 20)
+  UA_TOKENS=ua_live_a,ua_live_b       # comma/newline separated, tried in order
+  UA_TOKEN=ua_live_a                  # singular form, still accepted
+  UA_FOLDER_UUID=                     # optional destination folder, default account root
+  UA_POLL_MIN=20                      # minutes to wait for the file to appear
+  UA_COOLDOWN_H=6                     # hours a full/429-hit token is skipped
+
+Multi-token rotation (keyring.py): when one account can't fetch, the bot uses the
+next token. upload.am counts quotas and rate limits per token, so rotation DOES
+help for quota/rate-limit errors (unlike pixeldrain's per-IP rate limit).
+
+Errors and what the bot does:
+  invalid_token, expired_token, account_disabled   dead credential → dropped, try next
+  email_not_verified                               account can't upload → next token
+  quota_exceeded, file_too_large, plan_limit_...   plan quota used up → next token
+  429 rate_limited                                 per-TOKEN limit → cool down, next token
+  unsafe_url                                       refused URL → immediate stop, no rotation
+  network, timeout                                 transient → do not rotate, report error
 """
 import os
 import threading
@@ -24,12 +38,22 @@ from pyrogram.types import Message
 
 from . import config, state, log
 from .core import app
+from .keyring import Keyring
 from .utils import esc, fmtsz, guarded, safe_edit, throttled_edit
 
 logger = log.get(__name__)
 
 BASE = "https://upload.am/api/v1"
 POLL_EVERY = 10
+
+KEYS = Keyring(
+    "uploadam", "UA_TOKENS",
+    extra_env=("UA_TOKEN",),
+    dead={"invalid_token", "expired_token", "account_disabled"},
+    rotate={"quota_exceeded", "file_too_large", "plan_limit_reached",
+            "plan_feature_locked", "email_not_verified", "rate_limited"},
+    cooldown_s=max(1, int(os.environ.get("UA_COOLDOWN_H", "6") or 6)) * 3600,
+)
 
 
 class UaError(Exception):
@@ -38,18 +62,15 @@ class UaError(Exception):
         super().__init__(msg or code)
 
 
-def token():
-    return (os.environ.get("UA_TOKEN") or "").strip()
+def _headers(tok):
+    return {"Authorization": f"Bearer {tok}", "Content-Type": "application/json"}
 
 
-def _headers():
-    return {"Authorization": f"Bearer {token()}", "Content-Type": "application/json"}
-
-
-def _call(method, path, **kw):
-    """One API call, with upload.am's error envelope turned into UaError."""
+def _call(method, path, tok, **kw):
+    """One call with one token. Raises UaError carrying the server's code."""
     try:
-        r = requests.request(method, BASE + path, headers=_headers(), timeout=(20, 90), **kw)
+        r = requests.request(method, BASE + path, headers=_headers(tok),
+                             timeout=(20, 90), **kw)
     except Exception as e:
         raise UaError("network", str(e))
     if r.status_code == 429:
@@ -64,15 +85,48 @@ def _call(method, path, **kw):
     return body
 
 
+def _call_rotating(method, path, **kw):
+    """Try each token in turn. Returns (body, token) so the caller knows the owner.
+
+    Which token matters: /files is scoped per account, so the poll must list the
+    same account the fetch was queued on, or it watches the wrong list forever.
+    """
+    order = KEYS.order()
+    if not order:
+        raise UaError("no_tokens", "no UA_TOKENS configured")
+    last = None
+    for tok in order:
+        try:
+            body = _call(method, path, tok, **kw)
+            KEYS.mark_good(tok)
+            return body, tok
+        except UaError as e:
+            last = e
+            kind = KEYS.classify(e.code)
+            if kind == "dead":
+                KEYS.mark_dead(tok, e.code)
+                continue
+            if kind == "rotate":
+                KEYS.mark_full(tok, e.code)
+                continue
+            # unsafe_url / network / other 4xx: another account cannot fix it
+            raise
+    raise UaError("all_tokens_exhausted", f"every token failed (last: {last.code if last else '?'})")
+
+
 def remote_fetch(url, folder_uuid=None):
     payload = {"url": url}
     if folder_uuid:
         payload["folder_uuid"] = folder_uuid
-    return _call("POST", "/remote-upload", json=payload)
+    return _call_rotating("POST", "/remote-upload", json=payload)
 
 
-def _root_files():
-    return list(_call("GET", "/files?per_page=100").get("data") or [])
+def _root_files(tok=None):
+    """File list; with tok, only that account's (the poll needs the same one)."""
+    if tok:
+        return list(_call("GET", "/files?per_page=100", tok).get("data") or [])
+    body, _ = _call_rotating("GET", "/files?per_page=100")
+    return list(body.get("data") or [])
 
 
 def _pick_new(before, files):
@@ -94,7 +148,7 @@ def _describe(f):
             f.get("download_page_url") or f"https://upload.am/d/{f.get('uuid')}")
 
 
-def _poll(client, chat_id, msg_id, before, name_hint, task_id):
+def _poll(client, chat_id, msg_id, before, name_hint, task_id, tok):
     deadline = time.time() + max(1, int(os.environ.get("UA_POLL_MIN", "20") or 20)) * 60
     last = 0.0
     while time.time() < deadline:
@@ -102,12 +156,15 @@ def _poll(client, chat_id, msg_id, before, name_hint, task_id):
         if state.is_cancelled(task_id):
             return safe_edit(client, chat_id, msg_id, "🛑 Stopped checking.", force=True)
         try:
-            found = _pick_new(before, _root_files())
+            found = _pick_new(before, _root_files(tok))
         except UaError as e:
             logger.warning(f"upload.am poll: {e.code} — {e}")
-            if e.code in ("invalid_token", "account_disabled"):
+            if KEYS.classify(e.code) == "dead":
+                KEYS.mark_dead(tok, e.code)
                 return safe_edit(client, chat_id, msg_id,
-                                 f"❌ upload.am rejected the token: {esc(str(e))}", force=True)
+                                 f"❌ upload.am rejected the token used for this fetch "
+                                 f"({esc(e.code)}) — the file may still arrive; "
+                                 f"check <code>/ualist</code>.", force=True)
             continue
         if found:
             name, size, link = _describe(found)
@@ -139,10 +196,11 @@ Authorized = filters.create(_auth)
 @app.on_message(filters.command("ua") & Authorized)
 @guarded
 def cmd_ua(client, message):
-    if not token():
+    if not KEYS.configured():
         return message.reply_text(
-            "⚠️ <code>UA_TOKEN</code> is not set. Get one at upload.am → Account → API, "
-            "then add <code>UA_TOKEN=ua_live_…</code> to .env.")
+            "⚠️ No upload.am token configured. Get one at upload.am → Account → API, "
+            "then add <code>UA_TOKENS=ua_live_…</code> to .env "
+            "(comma-separated for several accounts).")
 
     parts = message.text.split(maxsplit=1)
     url = parts[1].strip() if len(parts) > 1 else ""
@@ -159,14 +217,27 @@ def cmd_ua(client, message):
     name_hint = os.path.basename(urlparse(url).path) or url
     status = message.reply_text(f"📤 Asking upload.am to fetch <code>{esc(name_hint[:60])}</code>…")
     try:
-        before = {f.get("uuid") for f in _root_files() if f.get("uuid")}
-        remote_fetch(url, (os.environ.get("UA_FOLDER_UUID") or "").strip() or None)
+        # Snapshot EVERY account before queuing: rotation may land on any of them,
+        # and a snapshot taken afterwards would already contain the new file.
+        snaps = {}
+        for t in KEYS.order():
+            try:
+                snaps[t] = {f.get("uuid") for f in _root_files(t) if f.get("uuid")}
+            except UaError as e:
+                logger.warning(f"upload.am: snapshot skipped for {KEYS.fp(t)}: {e.code}")
+        _, tok = remote_fetch(url, (os.environ.get("UA_FOLDER_UUID") or "").strip() or None)
+        before = snaps.get(tok, set())
     except UaError as e:
         hint = {
-            "invalid_token": "token rejected — check UA_TOKEN",
+            "no_tokens": "no UA_TOKENS configured",
+            "invalid_token": "token rejected — check UA_TOKENS",
+            "expired_token": "token expired — generate a new one on upload.am",
+            "account_disabled": "that upload.am account is disabled",
             "email_not_verified": "confirm your upload.am email first",
             "unsafe_url": "that URL points at a private/internal address — refused",
             "rate_limited": "too many requests — wait a minute",
+            "all_tokens_exhausted": "every upload.am account is full or rejected the file",
+            "network": f"couldn't reach upload.am ({e})",
         }.get(e.code, str(e))
         return safe_edit(client, message.chat.id, status.id, f"❌ {esc(hint)}")
 
@@ -176,15 +247,15 @@ def cmd_ua(client, message):
               f"📥 upload.am is fetching <code>{esc(name_hint[:60])}</code>…\n"
               "<i>No local disk used. I'll post the link when it lands.</i>")
     threading.Thread(target=_poll,
-                     args=(client, message.chat.id, status.id, before, name_hint, task_id),
+                     args=(client, message.chat.id, status.id, before, name_hint, task_id, tok),
                      daemon=True, name="ua-poll").start()
 
 
 @app.on_message(filters.command("ualist") & Authorized)
 @guarded
 def cmd_ualist(client, message):
-    if not token():
-        return message.reply_text("⚠️ <code>UA_TOKEN</code> is not set.")
+    if not KEYS.configured():
+        return message.reply_text("⚠️ No upload.am token configured (<code>UA_TOKENS</code>).")
     try:
         files = _root_files()
     except UaError as e:
