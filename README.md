@@ -343,6 +343,61 @@ limit, not an upload one, and rotation does not change it.
 
 DM a link to the bot's Instagram account and the file arrives in Telegram.
 
+### Setup
+
+Two Meta setups work; they are not interchangeable, so pick one and keep the
+token, host and account ID from the same one.
+
+**A — Instagram Login (start here).** No Facebook Page needed.
+1. Instagram app → Settings → Account type → switch to **Professional**
+   (Business or Creator).
+2. <https://developers.facebook.com/apps> → Create app → add the
+   **Instagram** product → *API setup with Instagram Login*.
+3. Add your Instagram account as an **Instagram tester** and accept the invite
+   in the Instagram app (App Dashboard → Roles → Instagram testers). Without
+   this step no token works, not even your own.
+4. Generate an **Instagram User access token** with `instagram_business_basic`
+   and `instagram_business_manage_messages`.
+5. Note the numeric **Instagram account ID** (178414…) — not the @handle.
+6. Put the values in `.env`:
+   `IG_API_HOST=https://graph.instagram.com`, `IG_PAGE_TOKEN=<token>`,
+   `IG_ACCOUNT_ID=<id>`, plus `IG_APP_SECRET`, `IG_VERIFY_TOKEN` and
+   `IG_WEBHOOK_PORT=8080`.
+
+**B — Facebook Login.** Required only if you already run a Page.
+`IG_API_HOST=https://graph.facebook.com`, token is a **Page** access token, and
+the Instagram Professional account must be linked to that Facebook Page in the
+Page's settings.
+
+**Webhook (both setups).** Meta needs a public HTTPS URL with a real
+certificate — self-signed is refused, and the bot's listener is plain HTTP, so
+put a proxy in front:
+
+```
+# Caddy (obtains and renews the certificate itself)
+your.domain.com {
+    reverse_proxy 127.0.0.1:8080
+}
+```
+
+Then App Dashboard → **Webhooks** → Instagram → Callback URL
+`https://your.domain.com/ig/webhook`, Verify Token = your `IG_VERIFY_TOKEN`,
+and subscribe to the **messages** and **messaging_postbacks** fields. The
+dashboard's "Verify and save" hits the bot's GET handler immediately, so the
+bot must already be running with the right `IG_VERIFY_TOKEN` when you click it.
+
+**App Review.** For accounts that are not admins/testers of your app, submit
+`instagram_business_manage_messages` for review. Your own accounts work
+without it.
+
+**Tokens expire.** Instagram User tokens are long-lived but not permanent;
+regenerate and restart if DMs stop arriving (the log shows the API rejecting
+the token). Keep the token out of git — `.env` only.
+
+**Last check.** `/directdownload` in Telegram should show the feature list and
+"not configured" should be gone. Tap 🔗 Connect, DM the code to your Instagram
+account, and the DM thread answers "✅ Linked".
+
 **Why it works this way.** Instagram DMs are readable only through Meta's
 official Instagram Messaging API. That requires all of: an Instagram
 **Professional** account (Business or Creator), a Facebook Page linked to it,

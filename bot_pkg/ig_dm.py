@@ -157,7 +157,7 @@ def send_ig_message(igsid, text):
         return False
     try:
         r = requests.post(
-            f"https://graph.facebook.com/v21.0/{config.IG_ACCOUNT_ID}/messages",
+            f"{config.IG_API_HOST}/{config.IG_API_VERSION}/{config.IG_ACCOUNT_ID}/messages",
             headers={"Authorization": f"Bearer {config.IG_PAGE_TOKEN}"},
             json={"recipient": {"id": igsid}, "message": {"text": text[:900]}},
             timeout=(10, 20))

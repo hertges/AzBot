@@ -76,6 +76,13 @@ MIN_FREE_MB = 300
 # Meta app with the instagram_business_manage_messages permission (App Review
 # for anyone outside your app's testers), and a public HTTPS webhook. There is
 # no password path, by design — the bot never asks for one.
+# Which Meta API setup the token belongs to. They are NOT interchangeable:
+#   graph.instagram.com  — Instagram Login, token is an Instagram User token,
+#                          no Facebook Page needed (simpler; start here)
+#   graph.facebook.com   — Facebook Login, token is a Page token, and the
+#                          Instagram account must be linked to a Facebook Page
+IG_API_HOST     = os.environ.get("IG_API_HOST", "https://graph.instagram.com").rstrip("/")
+IG_API_VERSION  = os.environ.get("IG_API_VERSION", "v23.0").strip() or "v23.0"
 IG_APP_SECRET   = os.environ.get("IG_APP_SECRET", "").strip()
 IG_PAGE_TOKEN   = os.environ.get("IG_PAGE_TOKEN", "").strip()
 IG_ACCOUNT_ID   = os.environ.get("IG_ACCOUNT_ID", "").strip()
