@@ -7,6 +7,21 @@ Telegram's MTProto layer via [Pyrogram](https://docs.pyrogram.org), not the
 HTTP Bot API, so files up to Telegram's real per-file limit for bots
 (~2GB) go through natively — no 50MB wall, no local Bot API server needed.
 
+## v21 changelog — Instagram token renewal
+
+- `bot_pkg/ig_token.py`: token store (`data/ig_token.json`, 0600), expiry
+  tracking, `GET /refresh_access_token` renewal, and a watchdog that refreshes
+  when fewer than 10 days remain — an Instagram Login token never lapses while
+  the bot runs.
+- `/igtoken <token>` (admin, private chat): validates against Meta first,
+  deletes the message carrying the token, then saves it. `/igtoken refresh` and
+  `/igtoken status` too.
+- `/directdownload` now shows the token's remaining life to everyone, so an
+  expiry is visible instead of looking like a broken bot.
+- Stored token beats the env value, so a refresh survives a restart.
+- Facebook Login tokens have no refresh endpoint and the code says so rather
+  than failing obscurely.
+
 ## v20 changelog — Instagram DM downloads (`/directdownload`)
 
 - `/directdownload` links a chat to the bot's Instagram account with a
@@ -390,9 +405,29 @@ bot must already be running with the right `IG_VERIFY_TOKEN` when you click it.
 `instagram_business_manage_messages` for review. Your own accounts work
 without it.
 
-**Tokens expire.** Instagram User tokens are long-lived but not permanent;
-regenerate and restart if DMs stop arriving (the log shows the API rejecting
-the token). Keep the token out of git — `.env` only.
+**Tokens expire — and renew themselves.** An Instagram Login token is valid
+for 60 days and can be extended indefinitely with Meta's
+`/refresh_access_token` endpoint. The bot runs a watchdog that refreshes when
+fewer than 10 days remain, writes the new token to `data/ig_token.json` (mode
+0600 — never `.env`, which would need editing and a restart), and keeps going.
+A running bot therefore never lapses.
+
+When a token genuinely dies (bot off for weeks, password change, permission
+revoked) DMs stop arriving silently, so:
+
+- `/directdownload` shows the token state to everyone who opens it —
+  `✅ valid — 45 days left`, `⚠️ expiring soon`, `❌ expired`. A silent
+  expiry would otherwise read as "the bot broke".
+- `/igtoken <token>` (admin, private chat only) stores a pasted token. It is
+  verified against Meta **before** being saved, the Telegram message carrying
+  it is deleted immediately, and a wrong token is rejected with nothing
+  written.
+- `/igtoken refresh` forces a renewal now; `/igtoken status` shows the clock.
+- Facebook Login Page tokens have no refresh endpoint, so the bot says exactly
+  that instead of pretending to renew them — regenerate those in the App
+  Dashboard and paste with `/igtoken`.
+
+The token is never logged. Failures record Meta's own error message only.
 
 **Last check.** `/directdownload` in Telegram should show the feature list and
 "not configured" should be gone. Tap 🔗 Connect, DM the code to your Instagram

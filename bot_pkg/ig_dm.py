@@ -30,7 +30,7 @@ import time
 
 import requests
 
-from . import config, state, log
+from . import config, state, log, ig_token
 from .core import app
 from .utils import esc, fmtsz, new_task_id, throttled_edit, cancel_kb
 
@@ -147,7 +147,8 @@ def unlink(chat_id):
 
 # ── Meta API helpers ──────────────────────────────────────────────────────
 def enabled():
-    return bool(config.IG_PAGE_TOKEN and config.IG_APP_SECRET)
+    """Feature is usable: a token (env or refreshed) and the app secret."""
+    return bool(ig_token.token() and config.IG_APP_SECRET)
 
 
 def send_ig_message(igsid, text):
@@ -158,7 +159,7 @@ def send_ig_message(igsid, text):
     try:
         r = requests.post(
             f"{config.IG_API_HOST}/{config.IG_API_VERSION}/{config.IG_ACCOUNT_ID}/messages",
-            headers={"Authorization": f"Bearer {config.IG_PAGE_TOKEN}"},
+            headers={"Authorization": f"Bearer {ig_token.token()}"},
             json={"recipient": {"id": igsid}, "message": {"text": text[:900]}},
             timeout=(10, 20))
         if r.status_code >= 400:

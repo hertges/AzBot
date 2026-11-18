@@ -15,10 +15,10 @@ import textwrap
 from pyrogram import filters
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from . import config, state, log
+from . import config, state, log, ig_token
 from .core import app
 from .ig_dm import FEATURES, LABEL, issue_code, unlink
-from .handlers_core import Authorized
+from .handlers_core import Authorized, AdminOnly
 from .utils import esc, guarded, safe_edit
 
 logger = log.get(__name__)
@@ -48,6 +48,16 @@ def _status_text(chat_id):
               "1. Tap <b>🔗 Connect</b> below for a one-time code.",
               "2. DM that code to the bot's Instagram account.",
               "3. Send an Instagram link in the same DM thread."]
+    st = ig_token.state()
+    if st != "no_token":
+        left = ig_token.days_left()
+        # The token is a shared server credential, so its state is shown to
+        # everyone: a silent expiry would otherwise look like "the bot broke".
+        lines.append(f"\n🔑 Token: {ig_token.STATUS[st]}"
+                     + (f" — {left:.0f} days left" if left is not None else ""))
+        if st in ("expiring", "expired"):
+            lines.append("<i>Admin: <code>/igtoken &lt;token&gt;</code>, or let the "
+                         "auto-refresh run.</i>")
     if mine:
         lines.append(f"\n✅ Linked: <code>{len(mine)}</code> Instagram account(s).")
     else:
@@ -77,6 +87,52 @@ def cmd_directdownload(client, message):
 @guarded
 def cmd_gdmlinks(client, message):
     cmd_directdownload(client, message)
+
+
+@app.on_message(filters.command("igtoken") & AdminOnly)
+@guarded
+def cmd_igtoken(client, message):
+    """/igtoken <token> — store a new Instagram access token.
+
+    Accepted over DM only: the token is a server credential, and the message is
+    deleted the moment it's read so it doesn't linger in chat history.
+    """
+    if message.chat.type != "private":
+        return message.reply_text("🔒 Send that in a private chat with me, not in a group.")
+
+    parts = (message.text or "").split(maxsplit=1)
+    arg = parts[1].strip() if len(parts) > 1 else ""
+    if arg.lower() in ("refresh", "renew"):
+        ok, why = ig_token.refresh(force=True)
+        icon = "✅" if ok else "❌"
+        return message.reply_text(f"{icon} {esc(why)}")
+    if arg.lower() in ("status", ""):
+        left = ig_token.days_left()
+        return message.reply_text(
+            f"🔑 {ig_token.STATUS[ig_token.state()]}"
+            + (f" — {left:.0f} days left" if left is not None else "")
+            + "\n\n<code>/igtoken &lt;token&gt;</code> — store a new token"
+            "\n<code>/igtoken refresh</code> — renew now (Instagram Login only)")
+
+    # delete first: the token must not stay in chat history even if the rest fails
+    try:
+        message.delete()
+    except Exception as e:
+        logger.warning(f"/igtoken: couldn't delete the message: {e}")
+
+    ok, info = ig_token.validate(arg)
+    if not ok:
+        return message.reply_text(f"❌ That token didn't work: {esc(info)}\n"
+                                  "Nothing was saved.")
+    ig_token.save(arg, None, source="tg")
+
+    # A fresh token is worth an immediate DM to the accounts already linked:
+    # otherwise the first message a user sends looks like a broken bot.
+    ok2, why = ig_token.refresh() if "graph.instagram.com" in config.IG_API_HOST else (False, "")
+    tail = f"\n🔄 Auto-refresh available: {esc(why)}" if why else ""
+    message.reply_text(f"✅ Token saved and verified ({esc(info)}). "
+                       f"Instagram DMs will work again.{tail}\n"
+                       f"<i>Your message with the token was deleted.</i>")
 
 
 @app.on_callback_query(filters.regex(r"^igdm:"))

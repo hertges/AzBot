@@ -195,13 +195,14 @@ def start():
                    handlers_instagram, handlers_drive, handlers_zip,
                    handlers_driveauth, handlers_fallback,
                    handlers_pixeldrain, handlers_uploadam,
-                   handlers_directdownload, ig_webhook)  # noqa: F401
+                   handlers_directdownload, ig_webhook, ig_token)  # noqa: F401
     logger.info("handlers registered: core, admin+shell, subproc, instagram+zip, drive+auth, "
                 "fallback, pixeldrain, uploadam, ig-dm")
     # Instagram DM webhook — a no-op unless IG_WEBHOOK_PORT and the IG_* creds
     # are set, so an unconfigured deploy opens no extra socket.
     try:
         ig_webhook.start()
+        ig_token.start()
     except Exception as e:
         logger.warning(f"ig webhook not started: {e}")
     try:
