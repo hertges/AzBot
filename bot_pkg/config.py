@@ -70,6 +70,22 @@ os.makedirs(INDEX_DIR, exist_ok=True)
 
 MIN_FREE_MB = 300
 
+# ── Instagram DM downloads (/directdownload) ────────────────────────────
+# DMs can only be read through Meta's official Instagram Messaging API, which
+# needs an Instagram PROFESSIONAL account, a Facebook Page linked to it, a
+# Meta app with the instagram_business_manage_messages permission (App Review
+# for anyone outside your app's testers), and a public HTTPS webhook. There is
+# no password path, by design — the bot never asks for one.
+IG_APP_SECRET   = os.environ.get("IG_APP_SECRET", "").strip()
+IG_PAGE_TOKEN   = os.environ.get("IG_PAGE_TOKEN", "").strip()
+IG_ACCOUNT_ID   = os.environ.get("IG_ACCOUNT_ID", "").strip()
+IG_VERIFY_TOKEN = os.environ.get("IG_VERIFY_TOKEN", "").strip()
+# Port for the tiny stdlib webhook listener. 0 = feature off (no listener at
+# all, so an unconfigured deploy opens no extra socket).
+IG_WEBHOOK_PORT = int(os.environ.get("IG_WEBHOOK_PORT", "0") or 0)
+# Where Meta POSTs. Also the path you register in the App Dashboard.
+IG_WEBHOOK_PATH = os.environ.get("IG_WEBHOOK_PATH", "/ig/webhook") or "/ig/webhook"
+
 # Telegram's hard per-file cap for bot uploads over MTProto (what Pyrogram
 # uses). This is the real ceiling regardless of client library — there is
 # no "native" way past it without switching to a user account.

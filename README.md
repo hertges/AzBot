@@ -7,6 +7,20 @@ Telegram's MTProto layer via [Pyrogram](https://docs.pyrogram.org), not the
 HTTP Bot API, so files up to Telegram's real per-file limit for bots
 (~2GB) go through natively — no 50MB wall, no local Bot API server needed.
 
+## v20 changelog — Instagram DM downloads (`/directdownload`)
+
+- `/directdownload` links a chat to the bot's Instagram account with a
+  one-time code; after that, DMing an Instagram link to that account delivers
+  the files to Telegram. `/gdmlinks` (same command, alternate name) shows and
+  revokes the connection.
+- `bot_pkg/ig_dm.py` — link store (IGSID → chat, codes hashed and single-use,
+  30-minute expiry), content classifier, DM event handler, download job.
+- `bot_pkg/ig_webhook.py` — stdlib webhook listener: Meta's GET verification,
+  mandatory `X-Hub-Signature-256` check, 200-then-work so Meta's 5-second
+  window is never missed.
+- No new dependencies. No Instagram password is ever requested or stored.
+- Live streams are refused with a reason (see below), not silently dropped.
+
 ## v19 changelog — public links (`/px`, `/ua`)
 
 - `/px` — reply to a file → pixeldrain link + direct download URL.
@@ -276,6 +290,13 @@ deletes it in both places. Rename the folder with `DATA_DRIVE_FOLDER=…`.
   itself, not open a page, so YouTube/Instagram pages still go through
   yt-dlp to local disk.
 - `/ualist` — newest files in the upload.am account root, with links.
+- `/directdownload` (also `/gdmlinks`) — connect an Instagram account to this
+  chat with a one-time code, then DM Instagram links to the bot's Instagram
+  account and the files arrive here. Shows what's supported and what isn't
+  (`❌ Live streams`), how to connect, and how many accounts are linked.
+  Buttons: 🔗 Connect · 🔌 Disconnect all · 🔄 Refresh. Requires the `IG_*`
+  env vars and a public HTTPS webhook; without them the command explains
+  exactly which variable is missing instead of failing silently.
 
 Google Drive upload is optional — leave `GCP_CLIENT_ID` etc. blank and
 `/m`, `/zm`, `/drive`, and `/drivesearch` will just tell you it's not
@@ -317,6 +338,49 @@ Host limits, for reference:
 
 pixeldrain throttles **downloads** to 6 GB/day per IP; that is a download
 limit, not an upload one, and rotation does not change it.
+
+## Instagram DM downloads
+
+DM a link to the bot's Instagram account and the file arrives in Telegram.
+
+**Why it works this way.** Instagram DMs are readable only through Meta's
+official Instagram Messaging API. That requires all of: an Instagram
+**Professional** account (Business or Creator), a Facebook Page linked to it,
+a Meta app with `instagram_manage_messages` (App Review for anyone who is not
+an app admin or tester), and a public HTTPS webhook. There is no
+password-based path, and this bot never asks for one.
+
+**Linking.** `/directdownload` mints a six-character code. Send it as a DM to
+the bot's Instagram account; the bot pairs that Instagram-scoped sender ID
+with your Telegram chat and deletes the code. Codes are single-use and expire
+after 30 minutes. What is stored on disk (`data/ig_dm.json`, mode 0600) is the
+IGSID → chat mapping only — no credentials, no OAuth tokens, no passwords.
+
+**What is supported**
+
+| content | status | note |
+|---|---|---|
+| Post (single image or video) | ✅ | |
+| Carousel | ✅ | every slide |
+| Reel | ✅ | |
+| Story | ✅ | needs a cookie profile (`/cookie`) |
+| Highlight | ✅ | same cookie requirement |
+| Live stream | ❌ | no Meta download API; recording someone else's live is a legal problem as well |
+
+Stories and highlights are served by Instagram only to logged-in sessions, so
+they use the same cookie profile `/ig` already uses. Disappearing/view-once
+media is not supported by Meta's media webhooks at all. A DM containing only a
+gif or sticker triggers no webhook — that is a platform limit, not a bug here.
+
+**Operational notes.** The webhook is a plain `ThreadingHTTPServer` on
+`IG_WEBHOOK_PORT`; TLS and the public hostname belong to a reverse proxy in
+front of it. Every POST is verified against `IG_APP_SECRET` — a request with a
+missing or wrong signature is rejected before any work happens, because
+otherwise anyone who guessed the URL could make the bot fetch arbitrary links.
+Delivery is asynchronous: the response goes out first, then the download is
+queued through the same job queue as every other command, so a burst of DMs
+cannot exceed the worker count. `IG_WEBHOOK_PORT=0` disables the whole feature
+and opens no socket.
 
 ## Reliability
 

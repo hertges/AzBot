@@ -194,9 +194,16 @@ def start():
     from . import (handlers_core, handlers_admin, handlers_shell, handlers_subproc,
                    handlers_instagram, handlers_drive, handlers_zip,
                    handlers_driveauth, handlers_fallback,
-                   handlers_pixeldrain, handlers_uploadam)  # noqa: F401
+                   handlers_pixeldrain, handlers_uploadam,
+                   handlers_directdownload, ig_webhook)  # noqa: F401
     logger.info("handlers registered: core, admin+shell, subproc, instagram+zip, drive+auth, "
-                "fallback, pixeldrain, uploadam")
+                "fallback, pixeldrain, uploadam, ig-dm")
+    # Instagram DM webhook — a no-op unless IG_WEBHOOK_PORT and the IG_* creds
+    # are set, so an unconfigured deploy opens no extra socket.
+    try:
+        ig_webhook.start()
+    except Exception as e:
+        logger.warning(f"ig webhook not started: {e}")
     try:
         from . import build_info
         logger.info(f"build: {build_info.build_line()} — if this stamp doesn't move "
