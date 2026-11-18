@@ -133,9 +133,10 @@ def cmd_ig(client, message):
 
 
 # ── /igindex — per-user index manager ────────────────────────────────────
-# Index ledgers live LOCALLY under data/indexes/<chat>/<user>.<type>.txt —
-# never in Drive. Re-running an archive only fetches what's new; deleting an
-# index makes the next run re-fetch everything for that user+type.
+# Index ledgers live under data/indexes/<user>.<type>.txt — flat, shared
+# across chats, and mirrored into AzBotData/indexes/ when Drive is configured
+# (see datastore.py). Re-running an archive only fetches what's new; deleting
+# an index makes the next run re-fetch everything for that user+type.
 
 @app.on_message(filters.command(["igindex", "igindexes"]) & Authorized)
 @guarded

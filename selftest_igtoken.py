@@ -100,5 +100,15 @@ assert not ok and "Invalid OAuth" in why, (ok, why)
 mode = oct(os.stat(ig_token.STORE).st_mode & 0o777)
 assert mode == "0o600", mode
 
+# 11) rendered text: no "-0", no doubled dash, correct singular
+ig_token.save("R" * 40, expires_in=45 * 86400)
+assert ig_token.life_text() == " — 45 days left", ig_token.life_text()
+ig_token.save("R" * 40, expires_in=24 * 3600 + 1800)
+assert ig_token.life_text() == " — 1 day left", ig_token.life_text()
+ig_token.save("R" * 40, expires_in=-100)
+assert ig_token.life_text() == "", ig_token.life_text()      # STATUS says "expired"
+ig_token.save("R" * 40)
+assert ig_token.life_text() == ""                             # expiry unknown
+
 print("OK — token precedence, expiry states, refresh due/forced/failed, "
-      "Facebook-Login refusal, validation and 0600 perms all behave")
+      "Facebook-Login refusal, validation, 0600 perms and rendered text all behave")

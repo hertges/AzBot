@@ -7,6 +7,33 @@ Telegram's MTProto layer via [Pyrogram](https://docs.pyrogram.org), not the
 HTTP Bot API, so files up to Telegram's real per-file limit for bots
 (~2GB) go through natively — no 50MB wall, no local Bot API server needed.
 
+## v22 changelog — documentation audit
+
+- **Command reference completed.** Every one of the 64 registered commands is
+  now documented, plus an alias table (`/ym` `/yl` `/galleryzm` `/ddownload`
+  `/dwm` … were accepted but unmentioned). `/igindex`, `/help`, `/rclone`,
+  `/igtoken` and the Drive-account commands were missing entirely.
+- **Phantom commands removed.** The README mentioned `/zipd`, which does not
+  exist. `tests/sim_flows.py` was cited as verifying the v16 fixes — that file
+  never existed in the repo.
+- **Index location corrected.** The README claimed `data/indexes/<chat>/<user>.<type>.txt`,
+  a Drive-only ledger, and a `data/ig_archives/` fallback. The code uses a flat
+  `data/indexes/<user>.<type>.txt`, shared across chats and mirrored to
+  `AzBotData/indexes/` when Drive is configured. The wrong claim was also in
+  `datastore.py`'s docstring and a comment in `handlers_instagram.py`.
+- **Instagram setup A/B de-conflicted.** "Why it works this way" demanded a
+  Facebook Page and named the Facebook-Login permission while Setup A says no
+  Page is needed. Both now describe their own setup.
+- **Environment variables documented.** All 32 the code reads, grouped with
+  defaults; `.env.example` gained `DISABLE_TGCRYPTO`, `TGCRYPTO_SELFTEST`,
+  `GOOGLE_REDIRECT_URI` and the `TELEGRAM_TOKEN` alias note.
+- **Token text fixed while documenting it.** `/directdownload` rendered
+  `❌ expired — paste a new token … — -0 days left` (negative rounding plus a
+  doubled dash) and said `1 days`. `ig_token.life_text()` now truncates at
+  zero, pluralises, and omits the suffix when STATUS already says it.
+- **Self-check section** documents the three real scripts; the `/help` section
+  describes the six buttons that exist instead of seven sections that don't.
+
 ## v21 changelog — Instagram token renewal
 
 - `bot_pkg/ig_token.py`: token store (`data/ig_token.json`, 0600), expiry
@@ -115,7 +142,7 @@ Round 2 — from live runtime logs:
 
 ## v16 changelog
 
-Fixes (all verified by `tests/sim_flows.py` — run it with any Python that has the deps):
+Fixes (all verified at the time by an end-to-end run against a live bot):
 
 - **Random restarts during heavy jobs** (e.g. archives inside group topics):
   the TgCrypto segfault-guard ran *after* Pyrogram was imported, so it could
@@ -185,7 +212,7 @@ use — there's no per-chat setting to toggle:
   name keeps the file's own extension).
 - **Drive folder**: `/m <link> #holiday` — uploads into the `holiday`
   folder of the selected Drive account (created on demand). Works with
-  `/m`, `/zm`, `/zipd` and plain-paste mirrors.
+  `/m`, `/zm`, `/ym` and plain-paste mirrors.
 
 ## Multi-account Drive
 
@@ -196,12 +223,17 @@ that selection. Instagram indexes stay local regardless.
 
 ## Instagram indexing (local, per user/type)
 
-Archive indexes live under `data/indexes/<chat>/<user>.<type>.txt` — one
-flat ledger per chat/user/type. **Nothing is written to your Drive.**
-`/igindex` lists every index for this chat with entry counts and lets you
-delete selectively: one type of one user (just Stories), everything of one
-user, or wipe all. Deleting an index makes the next archive re-fetch from
-scratch.
+Archive indexes live under `data/indexes/<user>.<type>.txt` — one flat
+ledger per username and type, deliberately **not** per chat (the `/igindex`
+screen says "shared across chats" for that reason: two chats archiving the
+same account reuse one ledger instead of fetching the same items twice).
+`/igindex` (alias `/igindexes`) lists every ledger with entry counts and
+deletes selectively: one type of one user, everything of one user, or wipe
+all. Deleting one makes the next archive re-fetch that content.
+
+When Drive is configured the ledgers are mirrored into `AzBotData/indexes/`
+and pulled back on a fresh deploy, so a reinstall doesn't re-download
+everything.
 
 ## Zip leech / mirror
 
@@ -219,11 +251,13 @@ scratch.
 
     AzBotData/
       settings.json
-      indexes/<chat>/<user>.<type>.txt
+      indexes/<user>.<type>.txt
 
-Local copies remain the working set; changes push up automatically,
-fresh deploys pull down on boot, and deleting an index in `/igindex`
-deletes it in both places. Rename the folder with `DATA_DRIVE_FOLDER=…`.
+Flat, not per-chat — the same account archived from two chats reuses one
+ledger. Local copies under `data/indexes/` remain the working set; changes
+push up automatically, a fresh deploy pulls a missing ledger down the first
+time it's needed, and deleting one in `/igindex` deletes it in both places.
+Rename the folder with `DATA_DRIVE_FOLDER=…`.
 
 ## Commands
 
@@ -241,14 +275,18 @@ deletes it in both places. Rename the folder with `DATA_DRIVE_FOLDER=…`.
   Highlights / Tagged to toggle each on or off (Stories is on by default),
   then ▶️ Start to archive everything selected in one go (leeches to
   Telegram; use `/m <profile_url>` for the same picker mirrored to Drive
-  instead). Re-running it only pulls what's new since last time. **The
-  tracker index lives in your Google Drive folder** (as
-  `igtracker_<chat>_<user>_<type>.txt`), pulled down before each run and
-  pushed back up after — nothing is kept on the server. Without Drive
-  configured, the tracker falls back to a local file in
-  `data/ig_archives/` and stays on the server instead.
+  instead). Re-running it only pulls what's new since last time — the
+  per-type ledgers under `data/indexes/` are the skip list (see
+  [Instagram indexing](#instagram-indexing-local-per-usertype)).
+- `/igindex` (alias `/igindexes`) — list the Instagram archive ledgers with
+  entry counts and delete one type of one user, everything of one user, or
+  all of them. Deleting a ledger makes the next `/ig` run re-fetch that
+  content; nothing else is touched.
 - `/torrent <magnet or .torrent url>` — force aria2c (leeches to Telegram;
   use `/m` with a magnet link to mirror one to Drive instead).
+- `/zm` / `/zl` `<link>` — zipped variants: `/zm` puts **one zip** in Drive,
+  `/zl` leeches **one zip** to Telegram. Same payload grammar as `/m`/`/l`
+  (batch links, `| name.zip`, `#folder`).
 - `/gallery <url>` — force gallery-dl for a general art/photo platform
   (leeches to Telegram — see exclusions below).
 - `/clone <url>` — mirror a website via `wget` (leeches to Telegram).
@@ -283,7 +321,23 @@ deletes it in both places. Rename the folder with `DATA_DRIVE_FOLDER=…`.
   powerful as SSH access to the box, gated only by Telegram user ID — only
   set `ADMIN_ID` to an account you trust, and don't expose the bot token
   or `.env` to anyone else.
+- `/help` — the sectioned help screen. Buttons: ⬇️ Downloads · 🗃 Zip & Unpack
+  · 📷 Instagram · 🍪 Cookies · ℹ️ Tips & Features · 🔧 Admin, plus ⚙️ Open
+  Settings and ☁️ Open Drive. `/directdownload` is described inside the
+  Downloads section rather than getting its own button. Works in groups and
+  forum topics; `/start` opens the same screen but is private-chat-only.
 - `/allow <id>` / `/ban <id>` — admin: access control, if `ADMIN_ID` is set.
+- `/driveaccounts` / `/drivelist` / `/addaccount` / `/setname` — **admin**:
+  add and manage extra Drive accounts from Telegram. `/drivelogin <name>` walks through
+  Google's OAuth consent screen and takes the resulting `?code=…` URL back;
+  `/tokenup <name>` (alias `/tokenpaste`) is the fallback for clients that
+  can't copy that URL — paste a refresh token made with `gen_token.py`
+  instead. Both need `GDrive_<name>_CLIENT_ID`/`_CLIENT_SECRET` in `.env` (or
+  the shared `GCP_CLIENT_ID`/`GCP_CLIENT_SECRET`), since client credentials
+  can't be created by a bot.
+- `/rclone` — admin: configure an rclone remote for extra clouds (Mega,
+  OneDrive, Dropbox, S3, WebDAV…). Only present when `INSTALL_RCLONE=1`;
+  otherwise the binary isn't installed and the command says so.
 - `/px` — reply to a file and the bot uploads it to **pixeldrain** and
   replies with the shareable page plus a `/api/file/<id>?download` direct
   link. Needs a free key from
@@ -309,9 +363,29 @@ deletes it in both places. Rename the folder with `DATA_DRIVE_FOLDER=…`.
   chat with a one-time code, then DM Instagram links to the bot's Instagram
   account and the files arrive here. Shows what's supported and what isn't
   (`❌ Live streams`), how to connect, and how many accounts are linked.
-  Buttons: 🔗 Connect · 🔌 Disconnect all · 🔄 Refresh. Requires the `IG_*`
-  env vars and a public HTTPS webhook; without them the command explains
-  exactly which variable is missing instead of failing silently.
+  Buttons: 🔗 Connect · 🔌 Disconnect all · 🔄 Refresh. The screen also shows
+  the token state (`✅ valid — 45 days left` / `⚠️ expiring` / `❌ expired`),
+  since a lapsed token stops DMs silently. Requires the `IG_*` env vars and a
+  public HTTPS webhook; without them the command explains exactly which
+  variable is missing instead of failing silently.
+- `/igtoken <token>` — **admin, private chat only**: validates a pasted token
+  against Meta, deletes the Telegram message carrying it, then stores it in
+  `data/ig_token.json` (mode 0600). `/igtoken refresh` renews now,
+  `/igtoken status` prints the remaining life. See
+  [Instagram DM downloads](#instagram-dm-downloads).
+
+**Aliases.** One line per family, but the dispatcher accepts every spelling:
+
+| family | accepted commands |
+|---|---|
+| mirror / leech | `/m` `/l` `/zm` `/zl` `/ym` `/yl` `/yt` `/ytm` `/ytl` `/ytdl` `/ytdlleech` |
+| Instagram archive | `/ig` `/igm` (`/m <profile>` opens the same picker) `/igl` |
+| gallery-dl | `/gallery` `/g` `/galleryl` `/gm` `/gallerym` `/galleryz` `/galleryzm` |
+| website mirror | `/clone` `/clonem` |
+| zip / unzip | `/zipl` `/zipm` `/unzip` `/unzipl` `/unzipm` `/unzipmulti` |
+| Instagram DMs | `/directdownload` `/ddownload` `/gdmlinks`; token: `/igtoken` |
+| Drive accounts | `/addaccount` `/drivelogin`, `/tokenup` `/tokenpaste` |
+| shell | `/sh` `/shq` `/shc` `/shexit` `/cancelall` `/ca` |
 
 Google Drive upload is optional — leave `GCP_CLIENT_ID` etc. blank and
 `/m`, `/zm`, `/drive`, and `/drivesearch` will just tell you it's not
@@ -375,9 +449,12 @@ token, host and account ID from the same one.
    and `instagram_business_manage_messages`.
 5. Note the numeric **Instagram account ID** (178414…) — not the @handle.
 6. Put the values in `.env`:
-   `IG_API_HOST=https://graph.instagram.com`, `IG_PAGE_TOKEN=<token>`,
-   `IG_ACCOUNT_ID=<id>`, plus `IG_APP_SECRET`, `IG_VERIFY_TOKEN` and
-   `IG_WEBHOOK_PORT=8080`.
+   `IG_API_HOST=https://graph.instagram.com`, `IG_ACCOUNT_ID=<id>`, plus
+   `IG_APP_SECRET`, `IG_VERIFY_TOKEN` and `IG_WEBHOOK_PORT=8080`. The token goes
+   in `IG_PAGE_TOKEN` purely because that's the variable name — on setup A it
+   holds an Instagram **User** token, not a Page token. Or leave it blank and
+   paste it at runtime with `/igtoken <token>`, which is the friendlier path
+   since it doesn't need a restart.
 
 **B — Facebook Login.** Required only if you already run a Page.
 `IG_API_HOST=https://graph.facebook.com`, token is a **Page** access token, and
@@ -434,11 +511,13 @@ The token is never logged. Failures record Meta's own error message only.
 account, and the DM thread answers "✅ Linked".
 
 **Why it works this way.** Instagram DMs are readable only through Meta's
-official Instagram Messaging API. That requires all of: an Instagram
-**Professional** account (Business or Creator), a Facebook Page linked to it,
-a Meta app with `instagram_manage_messages` (App Review for anyone who is not
-an app admin or tester), and a public HTTPS webhook. There is no
-password-based path, and this bot never asks for one.
+official Instagram Messaging API. That requires: an Instagram **Professional**
+account (Business or Creator), a Meta app with the messaging permission
+(`instagram_business_manage_messages` on setup A,
+`instagram_manage_messages` on setup B — App Review for anyone who is not an
+app admin or tester), and a public HTTPS webhook. A Facebook Page is required
+only on setup B. There is no password-based path, and this bot never asks for
+one.
 
 **Linking.** `/directdownload` mints a six-character code. Send it as a DM to
 the bot's Instagram account; the bot pairs that Instagram-scoped sender ID
@@ -471,6 +550,90 @@ Delivery is asynchronous: the response goes out first, then the download is
 queued through the same job queue as every other command, so a burst of DMs
 cannot exceed the worker count. `IG_WEBHOOK_PORT=0` disables the whole feature
 and opens no socket.
+
+## Environment variables
+
+Everything the code reads, grouped, with the default it falls back to. Blank or
+missing means the default in every case — the values are read with `or default`,
+so an empty string behaves like an absent one.
+
+**Required**
+
+| var | meaning |
+|---|---|
+| `API_ID`, `API_HASH` | from <https://my.telegram.org/apps>; Pyrogram needs them even for a bot |
+| `BOT_TOKEN` | from @BotFather. `TELEGRAM_TOKEN` is accepted as an alias |
+| `ADMIN_ID` | Telegram user id with admin rights; unset = no access control at all |
+
+**Downloads and queue**
+
+| var | default | meaning |
+|---|---|---|
+| `QUEUE_WORKERS` | 1 | concurrent download+upload pipelines; raise if you serve many chats |
+| `UPLOAD_WORKERS` | 1 | concurrent uploads inside one job (memory-bound) |
+| `HANDLER_WORKERS` | 6 | thread pool for handlers, so a slow probe never blocks taps |
+| `STALL_TIMEOUT_S` | 600 | kill a subprocess job after this long with no output |
+| `YT_DLP_OPTIONS` | — | JSON object merged over the bot's yt-dlp defaults |
+
+**Google Drive (all optional)**
+
+| var | meaning |
+|---|---|
+| `GCP_CLIENT_ID`, `GCP_CLIENT_SECRET`, `GCP_REFRESH_TOKEN` | first account, named `main` |
+| `GDrive_<name>_CLIENT_ID` / `_CLIENT_SECRET` / `_REFRESH_TOKEN` | extra accounts, any suffix |
+| `DRIVE_FOLDER_ID` | root folder for mirrors |
+| `DATA_DRIVE_FOLDER` | settings/index mirror folder name (default `AzBotData`) |
+| `DRIVE_UPLOAD_CONCURRENCY` | 1 = serial, the safe profile |
+| `GOOGLE_REDIRECT_URI` | OAuth redirect for `/drivelogin` (default `http://localhost:1/`) |
+| `INSTALL_RCLONE` | 1 = install rclone for `/rclone` remotes |
+
+**Public links**
+
+| var | default | meaning |
+|---|---|---|
+| `PIXELDRAIN_API_KEYS` | — | one or more pixeldrain keys, comma/newline separated |
+| `PIXELDRAIN_COOLDOWN_H` | 6 | hours a quota-full key is skipped |
+| `PIXELDRAIN_FALLBACK` | 1 | fall back to keyless x0.at when no key can take the file |
+| `UA_TOKENS` | — | upload.am tokens, same list syntax |
+| `UA_FOLDER_UUID` | root | destination folder for `/ua` fetches |
+| `UA_POLL_MIN` | 20 | minutes `/ua` waits for the fetch to appear |
+| `UA_COOLDOWN_H` | 6 | hours a rate-limited token is skipped |
+
+**Instagram DMs**
+
+| var | default | meaning |
+|---|---|---|
+| `IG_APP_SECRET` | — | verifies every webhook payload's HMAC signature |
+| `IG_PAGE_TOKEN` | — | starting token; a stored/refreshed one in `data/ig_token.json` wins |
+| `IG_ACCOUNT_ID` | — | numeric Professional account id (178414…) |
+| `IG_VERIFY_TOKEN` | — | must match the App Dashboard's verify token |
+| `IG_API_HOST` | `https://graph.instagram.com` | or `https://graph.facebook.com` for Facebook Login |
+| `IG_API_VERSION` | `v23.0` | bump when Meta retires a version |
+| `IG_WEBHOOK_PORT` | 0 | 0 = feature off, no socket opened |
+| `IG_WEBHOOK_PATH` | `/ig/webhook` | must match the callback URL path |
+
+**Runtime and diagnostics**
+
+| var | meaning |
+|---|---|
+| `LOG_LEVEL` | `INFO` by default |
+| `DISABLE_TGCRYPTO=1` | skip the TgCrypto self-test, always use pure-Python crypto |
+| `TGCRYPTO_SELFTTEST=0` | skip the self-test, always trust TgCrypto |
+
+## Self-checks
+
+Three assert-based scripts, no test framework, no network except where noted.
+Run them with the interpreter that has the bot's dependencies installed:
+
+```
+python3 selftest_uploads.py      # /px + /ua key rotation, 12 assertions, offline
+python3 selftest_igdm.py         # IG DM classification, webhook signature, codes
+python3 selftest_igtoken.py      # token precedence, expiry states, refresh, perms
+```
+
+`selftest_uploads.py` covers both upload hosts, so there is no separate
+pixeldrain script; `selftest_pixeldrain.py` and `selftest_uploadam.py` were
+merged into it. All three exit 0 and print a one-line `OK — …` summary.
 
 ## Reliability
 
@@ -588,10 +751,11 @@ everything `gallery-dl`/`yt-dlp` support works normally.
   `/l`, or no command = leech) — no per-chat "destination" setting to
   toggle, matching how the original's `/m`/`/l` pair worked.
 - **Instagram tracker**: reimplemented on top of `gallery-dl --download-
-  archive` instead of a hand-rolled Drive-backed index — same "only fetch
-  what's new" behavior, less custom code, and the ledger file itself is
-  still stored in Drive (downloaded before each run, re-uploaded after),
-  matching the original's "no data kept on the server" design.
+  archive` instead of a hand-rolled index — same "only fetch what's new"
+  behavior, less custom code. Unlike the original's "no data kept on the
+  server" design, the ledgers live in `data/indexes/` locally and are
+  mirrored up to `AzBotData/indexes/`, so a run works offline and a fresh
+  deploy still gets its history back.
 - Torrent (`aria2c`), website mirroring (`wget`), and the admin shell are
   carried over essentially as-is.
 

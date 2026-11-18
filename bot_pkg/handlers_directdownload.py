@@ -50,14 +50,15 @@ def _status_text(chat_id):
               "3. Send an Instagram link in the same DM thread."]
     st = ig_token.state()
     if st != "no_token":
-        left = ig_token.days_left()
         # The token is a shared server credential, so its state is shown to
         # everyone: a silent expiry would otherwise look like "the bot broke".
-        lines.append(f"\n🔑 Token: {ig_token.STATUS[st]}"
-                     + (f" — {left:.0f} days left" if left is not None else ""))
-        if st in ("expiring", "expired"):
-            lines.append("<i>Admin: <code>/igtoken &lt;token&gt;</code>, or let the "
-                         "auto-refresh run.</i>")
+        lines.append(f"\n🔑 Token: {ig_token.STATUS[st]}" + ig_token.life_text())
+        if st == "expiring":
+            lines.append("<i>Admin: the auto-refresh will renew this; "
+                         "<code>/igtoken refresh</code> forces it now.</i>")
+        elif st == "expired":
+            lines.append("<i>Admin: auto-refresh cannot revive an expired token — "
+                         "get a new one and run <code>/igtoken &lt;token&gt;</code>.</i>")
     if mine:
         lines.append(f"\n✅ Linked: <code>{len(mine)}</code> Instagram account(s).")
     else:
@@ -107,10 +108,8 @@ def cmd_igtoken(client, message):
         icon = "✅" if ok else "❌"
         return message.reply_text(f"{icon} {esc(why)}")
     if arg.lower() in ("status", ""):
-        left = ig_token.days_left()
         return message.reply_text(
-            f"🔑 {ig_token.STATUS[ig_token.state()]}"
-            + (f" — {left:.0f} days left" if left is not None else "")
+            f"🔑 {ig_token.STATUS[ig_token.state()]}" + ig_token.life_text()
             + "\n\n<code>/igtoken &lt;token&gt;</code> — store a new token"
             "\n<code>/igtoken refresh</code> — renew now (Instagram Login only)")
 

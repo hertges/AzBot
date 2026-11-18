@@ -37,6 +37,11 @@ CHECK_EVERY_S = 6 * 3600     # how often the watchdog looks
 _lock = threading.Lock()
 _started = False
 
+def _days(n):
+    n = int(round(n))
+    return f"{n} day{'' if n == 1 else 's'}"
+
+
 STATUS = {
     "expired":    "❌ expired — paste a new token with <code>/igtoken &lt;token&gt;</code>",
     "expiring":   "⚠️ expiring soon",
@@ -113,7 +118,7 @@ def save(tok, expires_in=None, source="manual"):
             d.pop("expires_at", None)
         _save(d)
     logger.info(f"ig_token: stored token from {source}"
-                + (f", valid {float(expires_in) / 86400:.0f} days" if expires_in else ""))
+                + (f", valid {_days(float(expires_in) / 86400)}" if expires_in else ""))
     return True
 
 
@@ -154,7 +159,7 @@ def refresh(force=False):
                        "Dashboard and paste it with /igtoken <token>")
     left = days_left()
     if not force and left is not None and left > REFRESH_BELOW_DAYS:
-        return True, f"not due yet — {left:.0f} days left"
+        return True, f"not due yet{life_text()}"
 
     try:
         r = requests.get(
@@ -171,7 +176,7 @@ def refresh(force=False):
     if r.status_code == 200 and new:
         save(new, body.get("expires_in"), source="auto-refresh")
         days = float(body.get("expires_in") or 0) / 86400
-        return True, f"refreshed — valid {days:.0f} more days"
+        return True, f"refreshed — valid {_days(days)} more"
     err = (body.get("error") or {}).get("message") or f"HTTP {r.status_code}"
     logger.warning(f"ig_token: refresh failed: {err}")
     return False, err
@@ -193,6 +198,20 @@ def _watch():
         time.sleep(CHECK_EVERY_S)
 
 
+def life_text():
+    """Suffix for the remaining life: ``' — 45 days left'``.
+
+    Empty when the expiry is unknown, and empty for a token that is already
+    expired — STATUS already spells that out, and appending a second
+    "— …" produced "❌ expired — paste a new token — -0 days left" (the -0
+    coming from rounding a negative fraction of a day).
+    """
+    d = days_left()
+    if d is None or d < 0:
+        return ""
+    return f" — {_days(d)} left"
+
+
 def start():
     """Start the watchdog once. No-op when no token is configured."""
     global _started
@@ -202,5 +221,5 @@ def start():
     threading.Thread(target=_watch, daemon=True, name="ig-token-watch").start()
     d = days_left()
     logger.info("ig_token: watchdog started"
-                + (f" — token has {d:.0f} days left" if d is not None else " (expiry unknown)"))
+                + (life_text() or " (expiry unknown)"))
     return True

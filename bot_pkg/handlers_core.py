@@ -123,7 +123,8 @@ HELP = {
            "<b>Instagram DMs</b> — <code>/directdownload</code> connects an Instagram "
            "account to this chat; after that, DM any post, carousel, reel, story or "
            "highlight link to the bot's Instagram account and the files arrive here. "
-           "No password ever asked for.\n\n"
+           "No password ever asked for. The screen shows the token's remaining life; "
+           "if it says expired, an admin can fix it with <code>/igtoken</code>.\n\n"
            "Magnet links are auto-detected in plain messages too. Reply to any file or link instead of typing a URL."),
     "ig": ("📷 <b>Instagram</b>\n\n"
            "<code>&lt;post/reel url&gt;</code> — just paste it, leeched like any other link "
@@ -169,7 +170,9 @@ HELP = {
               "<code>/stats</code> — disk, RAM, active jobs\n<code>/clean</code> — purge stale temp files\n"
               "<code>/cancel &lt;id&gt;</code> / 🛑 button — stop a job\n<code>/cancelall</code> — stop everything\n"
               "<code>/sh</code> — live persistent shell terminal (arrow keys, history, Ctrl+C button; <code>/shexit</code> quits)\n"
-              "<code>/allow &lt;id&gt;</code> / <code>/ban &lt;id&gt;</code> — access control"),
+              "<code>/allow &lt;id&gt;</code> / <code>/ban &lt;id&gt;</code> — access control\n"
+              "<code>/igtoken &lt;token&gt;</code> — replace the Instagram token (validated, "
+              "message deleted) · <code>/igtoken refresh</code> · <code>/igtoken status</code>"),
 }
 
 

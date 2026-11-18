@@ -1,6 +1,6 @@
 """Self-check for Instagram DM downloads. No bot, no network, no Meta.
 
-Run: python3 selftest_igd m.py     (needs pyrogram + requests installed)
+Run: python3 selftest_igdm.py     (needs pyrogram + requests installed)
 Prints OK or raises AssertionError.
 """
 import asyncio

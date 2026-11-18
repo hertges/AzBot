@@ -3,7 +3,7 @@ index ledgers live inside ONE Drive folder (default "AzBotData"):
 
     AzBotData/
       settings.json
-      indexes/<chat>/<user>.<type>.txt
+      indexes/<user>.<type>.txt      (flat — no chat subfolder)
 
 The local copies under data/ are the working set (fast, offline-safe);
 every change is mirrored up to Drive, and missing local pieces are pulled
